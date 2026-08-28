@@ -11,7 +11,7 @@
 
 下载并安装 [`OliviaSoul-2008.2.7-Setup.exe`](https://github.com/yilangren/OliviaSoul/releases/download/2008.2.7/OliviaSoul-2008.2.7-Setup.exe)。
 
-**注意：首封信非常慢，从导入开始可能到一小时以上，且token消耗较高，建议ds保有20元余额度；后续速度正常，费用也极大降低（一月几元左右）。**
+**注意：首封信非常慢，从导入开始可能到一小时以上，且token消耗较高，建议ds保有20元余额；后续速度正常（一般十分钟内），费用也极大降低（一月几元左右）。**
 
 ### 第一步：填写 DeepSeek API Key
 
