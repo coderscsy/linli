@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net462</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OliviaSoul</AssemblyName>
+    <RootNamespace>OliviaSoul</RootNamespace>
+    <AssemblyTitle>Olivia Soul</AssemblyTitle>
+    <Product>Olivia Soul</Product>
+    <Description>Olivia Soul 本机信件与记忆服务</Description>
+    <Version>2008.2.7</Version>
+    <AssemblyVersion>2008.2.7.0</AssemblyVersion>
+    <FileVersion>2008.2.7.0</FileVersion>
+    <ApplicationIcon>..\packaging\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net462" Version="1.0.3" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" />
+    <EmbeddedResource Include="..\public\olivia-soul-gold.png" LogicalName="OliviaSoul.olivia-soul-gold.png" />
+    <EmbeddedResource Include="..\packaging\splash-envelope.png" LogicalName="OliviaSoul.splash-envelope.png" />
+  </ItemGroup>
+</Project>

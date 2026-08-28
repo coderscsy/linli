@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Olivia Soul</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="titleBlock">
+        <h1 class="brandTitle"><img src="/admin/olivia-soul-gold.png?v=clean-2" alt="Olivia Soul"></h1>
+        <small class="disclaimer">本应用仅供学习交流，请在下载24小时内删除</small>
+      </div>
+      <div class="headerActions">
+        <span class="edition">交流学习版</span>
+        <span class="avatar">用</span>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="panel sidebar">
+        <div class="sideTitle">管理</div>
+        <nav class="sideTabs" aria-label="管理页签">
+          <button class="sideTab active" type="button" data-tab="settings">基础设置</button>
+          <button class="sideTab" type="button" data-tab="memory">记忆</button>
+          <button class="sideTab" type="button" data-tab="transcription">视频转文字</button>
+        </nav>
+      </aside>
+
+      <div class="content">
+        <section class="panel tabPage" data-page="settings">
+          <div class="panelHead">
+            <div>
+              <h2>基础设置</h2>
+              <p>配置客户端身份、模型与本机服务</p>
+            </div>
+          </div>
+          <section id="statusCards" class="cards basicStatus"></section>
+          <section class="settingsBlock">
+            <div class="settingsBlockHead">
+              <strong>客户端身份</strong>
+            </div>
+            <div class="identityFields">
+              <div>
+                <label for="offlineUid">UID</label>
+                <input id="offlineUid" inputmode="numeric" maxlength="18" placeholder="5200">
+              </div>
+              <div>
+                <label for="offlineNickname">用户名</label>
+                <input id="offlineNickname" maxlength="32" placeholder="用户">
+              </div>
+            </div>
+            <p id="identityResult" class="result autoSaveResult"></p>
+          </section>
+          <section class="settingsBlock">
+            <div class="settingsBlockHead">
+              <strong>AI 设置</strong>
+              <small>用于生成林离的回信与整理记忆</small>
+            </div>
+            <div class="modelSettings">
+              <div>
+                <label for="apiKey">API Key</label>
+                <div class="secretInput">
+                  <input id="apiKey" type="password" autocomplete="off" placeholder="填写 API Key，默认 DeepSeek">
+                  <button id="toggleApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                      <circle cx="12" cy="12" r="2.8"></circle>
+                      <path class="eyeSlash" d="m5 4 14 16"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <label class="checkbox">
+                <input id="customModel" type="checkbox">
+                <span>自定义模型与地址</span>
+              </label>
+              <div id="customFields" class="customFields" hidden>
+                <div>
+                  <label for="modelName">模型名</label>
+                  <input id="modelName" placeholder="模型名">
+                </div>
+                <div>
+                  <label for="modelBaseUrl">地址</label>
+                  <input id="modelBaseUrl" type="url" placeholder="https://example.com">
+                </div>
+              </div>
+            </div>
+            <div class="actions">
+              <button id="testDeepSeek" class="secondary">测试连通性</button>
+              <span id="deepSeekResult" class="result"></span>
+            </div>
+          </section>
+          <section id="serviceMountSettings" class="serviceMountSettings" hidden>
+            <div class="serviceMountHead">
+              <div>
+                <strong>客户端服务</strong>
+              </div>
+              <span id="serviceMountStatus" class="mountStatus">正在检测</span>
+            </div>
+            <div class="serviceMountBody">
+              <div class="clientPicker">
+                <label for="clientExe">游戏客户端</label>
+                <div>
+                  <input id="clientExe" readonly placeholder="请选择游戏 exe">
+                  <button id="selectClient" class="secondary" type="button">选择 exe</button>
+                </div>
+              </div>
+              <div>
+                <label for="servicePort">服务端口</label>
+                <input id="servicePort" type="number" min="1024" max="65535" step="1" inputmode="numeric">
+              </div>
+              <p id="serviceMountDetail" class="mountDetail"></p>
+            </div>
+            <div class="actions">
+              <button id="mountService" type="button">启用服务</button>
+              <button id="restoreClient" class="secondary" type="button" hidden>停用服务</button>
+              <span id="serviceMountResult" class="result"></span>
+            </div>
+          </section>
+          <section id="desktopSettings" class="appSettings" hidden>
+            <div>
+              <strong>桌面应用</strong>
+              <small>关闭或最小化窗口后，服务会继续在系统托盘运行</small>
+            </div>
+            <label class="checkbox">
+              <input id="autoStart" type="checkbox">
+              <span>开机自动启动</span>
+              <svg class="adminIcon" viewBox="0 0 24 24" role="img" aria-label="需要管理员权限">
+                <path d="M12 3 5.5 5.7v5.5c0 4.4 2.7 7.8 6.5 9.8 3.8-2 6.5-5.4 6.5-9.8V5.7L12 3Z"></path>
+                <path d="M12 6.2v11.4M7.9 8h8.2"></path>
+              </svg>
+            </label>
+          </section>
+        </section>
+
+        <section class="panel tabPage" data-page="memory" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>记忆</h2>
+              <p class="memoryWarning">如果你选择了篡改，那她就不再是林离。</p>
+            </div>
+            <button id="memoryProgress" class="memoryProgress" type="button">
+              <span class="memoryProgressLabel">正在读取整理状态</span>
+              <span class="memoryProgressTrack"><span></span></span>
+            </button>
+          </div>
+
+          <nav class="memoryTabs" aria-label="记忆栏目">
+            <button class="memoryTab active" type="button" data-memory-tab="manage">记忆管理</button>
+            <button class="memoryTab" type="button" data-memory-tab="soul">.soul导入</button>
+            <button class="memoryTab" type="button" data-memory-tab="ai">AI识别导入</button>
+            <button class="memoryTab" type="button" data-memory-tab="remote">远端记忆</button>
+          </nav>
+
+          <div class="memoryView" data-memory-view="soul" hidden>
+            <p class="memoryWarning">.soul 导入将覆盖当前全部记忆、摘要和视频，请先确认现有记忆无需保留。</p>
+            <div class="actions">
+              <button id="selectSoul" class="secondary" type="button">选择 .soul 文件</button>
+              <input id="soulFile" type="file" accept=".soul,application/x-olivia-soul" hidden>
+            </div>
+            <p id="soulImportResult" class="result"></p>
+          </div>
+
+          <div class="memoryView" data-memory-view="ai" hidden>
+            <textarea id="importContent" class="importTextarea" placeholder="粘贴完整往来全文"></textarea>
+            <div class="actions">
+              <button id="aiImport">开始识别（较慢）</button>
+              <button id="confirmImport" disabled>确认导入</button>
+            </div>
+            <p id="aiImportResult" class="result"></p>
+            <pre id="importResult">尚未识别</pre>
+          </div>
+
+          <div class="memoryView" data-memory-view="remote" hidden>
+            <div class="actions">
+              <button id="startRemoteMemory" type="button">一键导入</button>
+              <button id="cancelRemoteMemory" class="secondary danger" type="button" disabled>取消</button>
+            </div>
+            <div class="taskProgress" id="remoteMemoryProgress" data-state="idle">
+              <div><span id="remoteMemoryStage">等待导入</span><strong id="remoteMemoryPercent">0%</strong></div>
+              <span class="taskProgressTrack"><span></span></span>
+            </div>
+            <div class="taskProgress modelProgress" id="remoteMemoryModelProgress" data-state="idle" hidden>
+              <div><span id="remoteMemoryModelStage">等待下载模型</span><strong id="remoteMemoryModelPercent">0%</strong></div>
+              <span class="taskProgressTrack"><span></span></span>
+            </div>
+          </div>
+
+          <div class="memoryView" data-memory-view="manage">
+            <div class="memoryToolbar">
+              <div>
+                <strong>信件记忆</strong>
+                <small>每组包含日期、时间、来信与林离回信；日期可留空，时间未填默认为 12:00</small>
+              </div>
+              <div class="actions compactActions">
+                <button id="exportMemory" class="secondary" type="button">导出 .soul</button>
+                <button id="newMemoryExchange" type="button">新建</button>
+              </div>
+            </div>
+            <div id="memoryList" class="exchangeList"></div>
+            <p id="memoryResult" class="result"></p>
+          </div>
+        </section>
+
+        <section class="panel tabPage taskPage" data-page="transcription" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>视频转文字</h2>
+              <p>本地 Whisper 逐字转写，再由 DeepSeek 只做错字、标点和分段整理</p>
+            </div>
+          </div>
+          <section class="taskCard">
+            <div class="mediaPicker">
+              <button id="selectTranscriptionMedia" class="secondary" type="button">选择视频或音频</button>
+              <span id="transcriptionFileName">尚未选择文件</span>
+              <input id="transcriptionMediaFile" type="file" accept="video/*,audio/*,.mkv,.mov,.webm,.avi,.m4a,.flac" hidden>
+            </div>
+            <div class="actions">
+              <button id="startTranscription" type="button" disabled>开始转写</button>
+              <button id="cancelTranscription" class="secondary danger" type="button" disabled>取消</button>
+            </div>
+            <div class="taskProgress" id="transcriptionProgress" data-state="idle">
+              <div><span id="transcriptionStage">等待选择媒体文件</span><strong id="transcriptionPercent">0%</strong></div>
+              <span class="taskProgressTrack"><span></span></span>
+            </div>
+            <div class="taskProgress modelProgress" id="transcriptionModelProgress" data-state="idle" hidden>
+              <div><span id="transcriptionModelStage">等待下载模型</span><strong id="transcriptionModelPercent">0%</strong></div>
+              <span class="taskProgressTrack"><span></span></span>
+            </div>
+          </section>
+          <div class="transcriptGrid">
+            <section>
+              <label for="rawTranscript">原始转写</label>
+              <textarea id="rawTranscript" readonly placeholder="完成后显示 Whisper 原始转写"></textarea>
+            </section>
+            <section>
+              <label for="organizedTranscript">整理文字</label>
+              <textarea id="organizedTranscript" readonly placeholder="完成后显示 DeepSeek 整理文字"></textarea>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel tabPage debugPage" data-page="debug" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>调试</h2>
+              <p>查看整理结果与调整本机测试参数</p>
+            </div>
+          </div>
+          <div class="debugSettings">
+            <section class="debugCard">
+              <label class="checkbox">
+                <input id="showSummaries" type="checkbox">
+                <span>显示摘要</span>
+              </label>
+              <small>开启后，逐封摘要见记忆页；这里只显示已经整理好的旧记忆合集</small>
+              <div id="debugSummaries" class="debugSummaries" hidden>
+                <div id="bulkSummarySection" hidden>
+                  <strong>旧记忆合集</strong>
+                  <p id="bulkSummary"></p>
+                </div>
+              </div>
+            </section>
+            <section class="debugCard">
+              <div>
+                <label id="debugDelayLabel" for="debugDelay">回信最小延迟（读取中）</label>
+                <input id="debugDelay" type="number" min="0" max="86400" step="1">
+              </div>
+              <div class="actions">
+                <button id="defaultDebugDelay" class="secondary" type="button">恢复默认 300s</button>
+                <span id="debugDelayResult" class="result"></span>
+              </div>
+            </section>
+            <section class="debugCard quotaReset">
+              <div>
+                <strong>今日信件次数</strong>
+                <small id="debugQuotaStatus">正在读取</small>
+              </div>
+              <button id="resetTodayQuota" class="secondary" type="button">重置今天信件次数</button>
+            </section>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <div id="noticeLayer" class="noticeLayer" hidden>
+    <section class="noticeDialog" role="dialog" aria-modal="true" aria-labelledby="noticeTitle" aria-describedby="noticeMessage">
+      <div class="noticeHead">
+        <strong id="noticeTitle">提示</strong>
+        <button id="noticeClose" class="noticeClose" type="button" aria-label="关闭">×</button>
+      </div>
+      <p id="noticeMessage"></p>
+      <div class="noticeActions">
+        <button id="noticeCancel" class="secondary" type="button" hidden>取消</button>
+        <button id="noticeConfirm" type="button">确定</button>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="/admin/app.js"></script>
+</body>
+</html>

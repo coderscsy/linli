@@ -1,0 +1,15 @@
+{
+  "name": "olivia-soul",
+  "version": "2008.2.7",
+  "private": true,
+  "description": "Olivia Soul 本机信件与记忆服务",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "build:win": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging/build-release.ps1",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

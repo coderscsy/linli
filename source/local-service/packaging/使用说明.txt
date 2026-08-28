@@ -1,0 +1,13 @@
+Olivia Soul · 交流学习版
+
+推荐使用 OliviaSoul-2008.2.7-Setup.exe 安装。
+也可解压 OliviaSoul-2008.2.7-Portable.zip，运行 OliviaSoul.exe。
+
+程序内置 Node.js、FFmpeg、whisper.cpp 和 Whisper small 语音模型。视频与音频转写在本机完成，首次使用不再下载语音模型。启动时会检测 Microsoft Edge WebView2 Runtime；如系统缺失，会运行微软在线引导程序，因此缺少 WebView2 的电脑首次安装仍需联网。
+
+首次运行时数据为空。使用者需要自行填写 DeepSeek API Key、自行选择本机游戏 exe，并自行建立或导入往来记忆。
+标准记忆 JSON 可直接解析；其他文本会调用已配置的 DeepSeek 识别。
+
+本发布包不包含任何使用者个人信息、信件、记忆、摘要、缓存、密钥、数据库、日志、原始抓包或 BSide Olivia 客户端资源。
+
+本应用仅供学习交流，请在下载 24 小时内删除。
