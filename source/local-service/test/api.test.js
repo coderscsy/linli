@@ -615,10 +615,13 @@ test("逐封摘要绑定内容 MD5，旧信合集绑定有序哈希链", async t
 
   const memory = (await ctx.request("/admin/api/memory")).body.data.exchanges;
   memory[memory.length - 1].reply = "被修改的最旧回信";
-  await ctx.request("/admin/api/memory", {
+  const saved = await ctx.request("/admin/api/memory", {
     method: "POST",
     body: JSON.stringify({ exchanges: memory }),
   });
+  assert.equal(saved.body.data.state, "paused");
+  assert.equal(refreshCount, 1);
+  await ctx.request("/admin/api/memory/refresh", { method: "POST", body: "{}" });
   for (let index = 0; index < 100 && refreshCount < 2; index++)
     await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
   assert.equal(ctx.service.db.prepare("SELECT COUNT(*) count FROM memory_bulk_summaries").get().count, 0);
@@ -682,6 +685,126 @@ test("记忆整理状态返回真实逐封进度", async t => {
   assert.equal(status.body.data.progressPercent, 47);
   release();
   release = null;
+});
+
+test("修改记忆会立即中断整理并暂停到手动继续", async t => {
+  let refreshCount = 0;
+  let releaseFirst;
+  let firstStarted = false;
+  let firstKilled = false;
+  const ctx = await fixture({
+    memoryRetryIntervalMs: 10_000,
+    memoryRefresher: async (inputFile, outputFile, onSpawn) => {
+      refreshCount++;
+      const task = JSON.parse(await readFile(inputFile, "utf8"));
+      if (refreshCount === 1) {
+        firstStarted = true;
+        onSpawn({ kill: () => firstKilled = true });
+        await new Promise(resolvePromise => releaseFirst = resolvePromise);
+        await writeFile(outputFile, JSON.stringify({
+          summaries: task.exchanges.map(exchange => ({
+            letterId: exchange.letterId,
+            contentMd5: exchange.contentMd5,
+            summary: "必须抛弃的旧请求结果",
+          })),
+          oldMemory: task.oldMemory,
+        }));
+        return;
+      }
+      await writeFile(outputFile, JSON.stringify({
+        summaries: task.exchanges.map(exchange => ({
+          letterId: exchange.letterId,
+          contentMd5: exchange.contentMd5,
+          summary: "继续后的摘要",
+        })),
+        oldMemory: task.oldMemory,
+      }));
+    },
+  });
+  t.after(async () => {
+    if (releaseFirst) releaseFirst();
+    await ctx.close();
+  });
+  await ctx.request("/admin/api/memory/import", {
+    method: "POST",
+    body: JSON.stringify({
+      exchanges: [{ date: "2026-08-29", incoming: "修改前", reply: "回信" }],
+    }),
+  });
+  for (let index = 0; index < 100 && !firstStarted; index++)
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  const exchanges = (await ctx.request("/admin/api/memory")).body.data.exchanges;
+  exchanges[0].incoming = "修改后";
+  const saved = await Promise.race([
+    ctx.request("/admin/api/memory", {
+      method: "POST",
+      body: JSON.stringify({ exchanges }),
+    }),
+    new Promise((resolvePromise, reject) => setTimeout(() => reject(new Error("保存等待了旧整理任务")), 250)),
+  ]);
+  assert.equal(saved.body.data.state, "paused");
+  assert.equal(firstKilled, true);
+  assert.equal((await ctx.request("/admin/api/memory")).body.data.exchanges[0].incoming, "修改后");
+  releaseFirst();
+  releaseFirst = null;
+  await new Promise(resolvePromise => setImmediate(resolvePromise));
+  await new Promise(resolvePromise => setImmediate(resolvePromise));
+  assert.notEqual(
+    (await ctx.request("/admin/api/memory")).body.data.exchanges[0].summary,
+    "必须抛弃的旧请求结果",
+  );
+  await ctx.request("/admin/api/memory/refresh", { method: "POST", body: "{}" });
+  for (let index = 0; index < 100; index++) {
+    if ((await ctx.request("/admin/api/memory/status")).body.data.state === "idle") break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+  assert.equal(refreshCount, 2);
+  assert.equal((await ctx.request("/admin/api/memory")).body.data.exchanges[0].summary, "继续后的摘要");
+});
+
+test("修改记忆暂停一分钟后会自动继续整理", async t => {
+  let refreshCount = 0;
+  const ctx = await fixture({
+    memoryRetryIntervalMs: 30,
+    memoryRefresher: async (inputFile, outputFile) => {
+      refreshCount++;
+      const task = JSON.parse(await readFile(inputFile, "utf8"));
+      await writeFile(outputFile, JSON.stringify({
+        summaries: task.exchanges.map(exchange => ({
+          letterId: exchange.letterId,
+          contentMd5: exchange.contentMd5,
+          summary: `自动摘要-${refreshCount}`,
+        })),
+        oldMemory: task.oldMemory,
+      }));
+    },
+  });
+  t.after(() => ctx.close());
+  await ctx.request("/admin/api/memory/import", {
+    method: "POST",
+    body: JSON.stringify({
+      exchanges: [{ date: "2026-08-29", incoming: "初始内容", reply: "初始回信" }],
+    }),
+  });
+  for (let index = 0; index < 100; index++) {
+    if (refreshCount === 1 && (await ctx.request("/admin/api/memory/status")).body.data.state === "idle") break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+  const exchanges = (await ctx.request("/admin/api/memory")).body.data.exchanges;
+  exchanges[0].reply = "连续修改后的回信";
+  const saved = await ctx.request("/admin/api/memory", {
+    method: "POST",
+    body: JSON.stringify({ exchanges }),
+  });
+  assert.equal(saved.body.data.state, "paused");
+  assert.equal(refreshCount, 1);
+  for (let index = 0; index < 100; index++) {
+    const status = await ctx.request("/admin/api/memory/status");
+    if (refreshCount === 2 && status.body.data.state === "idle") break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+  assert.equal(refreshCount, 2);
+  assert.equal((await ctx.request("/admin/api/memory/status")).body.data.state, "idle");
 });
 
 test("记忆整理失败且仍有缺失摘要时每分钟自动重试", async t => {
@@ -881,7 +1004,7 @@ test("导入后立即写信会等待首次记忆整理再进入预检", async t 
     if (finishInitialMemory) finishInitialMemory();
     await ctx.close();
   });
-  await ctx.request("/admin/api/memory", {
+  await ctx.request("/admin/api/memory/import", {
     method: "POST",
     body: JSON.stringify({
       exchanges: [{ date: "2026-08-28", incoming: "导入的来信", reply: "导入的回信" }],
@@ -2070,6 +2193,8 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.match(app, /data-action="video-file"/u);
   assert.match(app, /data-action="remove-video"/u);
   assert.match(app, /memoryExchanges\.length \? "已保存，等待整理" : ""/u);
+  assert.match(app, /paused: "整理暂停 · 点击继续"/u);
+  assert.match(app, /\["pending", "paused", "failed"\]/u);
   assert.match(app, /label\.classList\.toggle\("loadingShine", status\.state === "running"\)/u);
   assert.doesNotMatch(app, /替换视频/u);
   assert.match(styles, /\.videoAttachment/u);

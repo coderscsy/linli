@@ -147,7 +147,8 @@ function renderMemoryStatus(status) {
   progress.style.display = "grid";
   const labels = {
     idle: "记忆整理完成",
-    pending: "记忆整理中断 · 点击继续",
+    pending: "等待整理 · 点击继续",
+    paused: "整理暂停 · 点击继续",
     running: status.progressStage === "bulk"
       ? "正在整理旧信合集"
       : status.progressTotal
@@ -499,7 +500,7 @@ $("#cancelRemoteMemory").addEventListener("click", safely(async () => {
   ));
 }));
 $("#memoryProgress").addEventListener("click", safely(async () => {
-  if (!["pending", "failed"].includes($("#memoryProgress").dataset.state)) return;
+  if (!["pending", "paused", "failed"].includes($("#memoryProgress").dataset.state)) return;
   renderMemoryStatus({ state: "running", error: null });
   renderMemoryStatus(await api("/admin/api/memory/refresh", { method: "POST", body: "{}" }));
 }));

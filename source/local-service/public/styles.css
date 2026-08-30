@@ -196,7 +196,8 @@ small { display: block; color: #77777d; font-size: 11px; margin-top: 2px; }
 .memoryProgressTrack span { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: #d8d2c8; transition: width .25s ease; }
 .memoryProgress.idle { cursor: default; color: #93a397; }
 .memoryProgress.idle .memoryProgressTrack span { width: 100%; background: #65796c; }
-.memoryProgress.pending .memoryProgressTrack span { background: #a79578; }
+.memoryProgress.pending .memoryProgressTrack span,
+.memoryProgress.paused .memoryProgressTrack span { background: #a79578; }
 .memoryProgress.failed { border-color: #613e42; color: #d49a9a; }
 .memoryProgress.failed .memoryProgressTrack span { background: #9b5158; }
 .modelSettings, .importRow { display: grid; gap: 12px; }

@@ -503,7 +503,7 @@ export async function createOliviaService(options = {}) {
     INSERT INTO settings(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(key, String(value));
-  db.prepare("UPDATE settings SET value = 'pending' WHERE key LIKE 'memory_state:%' AND value = 'running'").run();
+  db.prepare("UPDATE settings SET value = 'pending' WHERE key LIKE 'memory_state:%' AND value IN ('running', 'paused')").run();
   if (options.delaySeconds !== undefined) setSetting(REPLY_DELAY_SETTING, options.delaySeconds);
   function initializeLocalUser() {
     const currentId = Number(getSetting("current_user_id"));
@@ -1127,6 +1127,62 @@ export async function createOliviaService(options = {}) {
     return !bulk || !bulk.summary || bulk.hashes_json !== JSON.stringify(oldHashes);
   }
 
+  async function resumeMemoryRefresh(person) {
+    const job = memoryJobs.get(person);
+    if (job) {
+      job.cancelled = true;
+      job.child?.kill();
+      await job.promise;
+    }
+    if (!memoryNeedsRefresh()) {
+      setMemoryStatus(person, "idle");
+      return getMemoryStatus(person);
+    }
+    setMemoryStatus(person, "pending");
+    return triggerMemoryRefresh(person);
+  }
+
+  function resetMemoryRetryTimer() {
+    clearTimeout(memoryRetryTimer);
+    if (closing || !runMemoryRefresh) return;
+    memoryRetryTimer = setTimeout(async () => {
+      try {
+        const status = getMemoryStatus(localUser.person);
+        if (status.state === "paused") {
+          await resumeMemoryRefresh(localUser.person);
+          return;
+        }
+        if (status.state !== "failed") return;
+        if (!memoryNeedsRefresh()) {
+          setMemoryStatus(localUser.person, "idle");
+          return;
+        }
+        setMemoryStatus(localUser.person, "pending");
+        triggerMemoryRefresh(localUser.person);
+      } catch (error) {
+        console.error(`[memory-retry-error] message=${error.message}`);
+        setMemoryStatus(localUser.person, "failed", error.message);
+      } finally {
+        resetMemoryRetryTimer();
+      }
+    }, memoryRetryIntervalMs);
+    memoryRetryTimer.unref();
+  }
+
+  function pauseMemoryRefresh(person) {
+    const job = memoryJobs.get(person);
+    if (job) {
+      job.cancelled = true;
+      job.child?.kill();
+    }
+    if (!runMemoryRefresh) {
+      setMemoryStatus(person, "idle");
+      return;
+    }
+    setMemoryStatus(person, "paused");
+    resetMemoryRetryTimer();
+  }
+
   async function interruptMemoryRefresh(person) {
     const job = memoryJobs.get(person);
     if (job) {
@@ -1204,6 +1260,7 @@ export async function createOliviaService(options = {}) {
       .then(async () => {
         if (job.cancelled) return;
         const result = JSON.parse(await readFile(outputFile, "utf8"));
+        if (job.cancelled) return;
         if (!Array.isArray(result.summaries)) throw new Error("摘要输出缺少逐封摘要");
         const expected = new Map(rows.map(row => [row.id, row]));
         const seenSummaryIds = new Set();
@@ -1252,6 +1309,10 @@ export async function createOliviaService(options = {}) {
           throw error;
         }
         await rebuildArchiveProjection(localUser);
+        if (job.cancelled) {
+          await rebuildArchiveProjection(localUser);
+          return;
+        }
         setMemoryStatus(safePerson, "idle");
         console.log(`[memory-job] completed rows=${rows.length}`);
       })
@@ -1287,7 +1348,6 @@ export async function createOliviaService(options = {}) {
 
   async function saveMemoryExchanges(user, exchanges) {
     const safePerson = assertPerson(user.person);
-    await interruptMemoryRefresh(safePerson);
     const currentRows = memoryRows(user.id);
     const currentById = new Map(currentRows.map(row => [row.id, row]));
     const retainedIds = new Set();
@@ -1301,6 +1361,7 @@ export async function createOliviaService(options = {}) {
       return { ...exchange, letterId: id, contentMd5: exchangeContentMd5(exchange) };
     });
     const deletedRows = currentRows.filter(row => !retainedIds.has(row.id));
+    pauseMemoryRefresh(safePerson);
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare("UPDATE letters SET memory_order = NULL WHERE user_id = ? AND memory_order IS NOT NULL").run(user.id);
@@ -1346,8 +1407,10 @@ export async function createOliviaService(options = {}) {
     for (const row of deletedRows)
       if (row.reply_video) await rm(join(videosDir, row.reply_video), { force: true });
     await rebuildArchiveProjection(user);
-    setMemoryStatus(safePerson, exchanges.length ? "pending" : "idle");
-    return exchanges.length ? triggerMemoryRefresh(safePerson) : getMemoryStatus(safePerson);
+    if (!exchanges.length) {
+      setMemoryStatus(safePerson, "idle");
+    }
+    return getMemoryStatus(safePerson);
   }
 
   async function withMemoryLock(person, action) {
@@ -1927,7 +1990,7 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "POST" && path === "/admin/api/memory/refresh") {
       const user = getLocalUser();
-      return ok(req, res, triggerMemoryRefresh(user.person));
+      return ok(req, res, await resumeMemoryRefresh(user.person));
     }
 
     if (req.method === "POST" && path === "/admin/api/memory/import/soul") {
@@ -2084,18 +2147,7 @@ export async function createOliviaService(options = {}) {
   await archivePendingReplies();
   await ensureArchiveProjection(localUser);
   triggerPendingMemoryRefreshes();
-  if (runMemoryRefresh) {
-    memoryRetryTimer = setInterval(() => {
-      if (closing || getMemoryStatus(localUser.person).state !== "failed") return;
-      if (!memoryNeedsRefresh()) {
-        setMemoryStatus(localUser.person, "idle");
-        return;
-      }
-      setMemoryStatus(localUser.person, "pending");
-      triggerMemoryRefresh(localUser.person);
-    }, memoryRetryIntervalMs);
-    memoryRetryTimer.unref();
-  }
+  resetMemoryRetryTimer();
   wakeWorker();
   return {
     db,
@@ -2112,7 +2164,7 @@ export async function createOliviaService(options = {}) {
     async close() {
       closing = true;
       clearTimeout(workerTimer);
-      clearInterval(memoryRetryTimer);
+      clearTimeout(memoryRetryTimer);
       for (const job of memoryJobs.values()) {
         job.cancelled = true;
         job.child?.kill();
