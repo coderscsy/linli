@@ -31,12 +31,11 @@ test("extracts complete UTF-16LE strings at odd and even offsets after printable
   ]);
 });
 
-test("limits extracted string length without decoding an unbounded run", () => {
+test("omits printable runs that exceed the bounded string limit", () => {
   const buffer = Buffer.from("LivePlayer".repeat(10), "ascii");
 
-  assert.deepEqual(extractPrintableStrings(buffer, { maxStringLength: 12 }), [
-    { encoding: "ascii", offset: 0, value: "LivePlayerLi" },
-  ]);
+  assert.deepEqual(extractPrintableStrings(buffer, { maxStringLength: 12 }), []);
+  assert.throws(() => extractPrintableStrings(buffer, { maxStringLength: 64 * 1024 + 1 }), /必须介于/u);
 });
 
 test("collects sorted, deduplicated protocol evidence and classifies paths", async () => {
@@ -163,4 +162,24 @@ test("rejects non-string paths without invoking user conversion", async () => {
 
   await assert.rejects(() => collectProtocolEvidence([malicious]), /仅包含字符串路径/u);
   assert.equal(converted, false);
+});
+
+test("omits overlong ASCII and UTF-16LE protocol runs even when credentials begin after the limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
+  try {
+    const ascii = join(root, "overlong-ascii.dll");
+    const utf16 = join(root, "overlong-utf16.dll");
+    const noCredential = join(root, "overlong-safe.dll");
+    const credential = `x${"-"}token=secret`;
+    await writeFile(ascii, `LivePlayerStartNotify${"A".repeat(64)}${credential}\0`);
+    await writeFile(utf16, Buffer.from(`render_ready${"B".repeat(64)}${credential}\0`, "utf16le"));
+    await writeFile(noCredential, `LivePlayerStartNotify${"C".repeat(64)}\0`);
+
+    const evidence = await collectProtocolEvidence([ascii, utf16, noCredential], { maxStringLength: 24 });
+    const serialized = JSON.stringify(evidence);
+    assert.deepEqual(evidence.markers, []);
+    assert.doesNotMatch(serialized, /LivePlayerStartNotify|render_ready|secret/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

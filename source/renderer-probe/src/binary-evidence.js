@@ -108,11 +108,13 @@ function extractAscii(buffer, maxStringLength, scanComplete) {
     }
     const offset = index;
     let value = "";
+    let overflow = false;
     while (index < buffer.length && isPrintable(buffer[index])) {
       if (value.length < maxStringLength) value += String.fromCharCode(buffer[index]);
+      else overflow = true;
       index += 1;
     }
-    if (value.length >= MIN_STRING_LENGTH && (scanComplete || index < buffer.length)) {
+    if (!overflow && value.length >= MIN_STRING_LENGTH && (scanComplete || index < buffer.length)) {
       strings.push({ encoding: "ascii", offset, value });
       if (buffer[index] === 0) terminators.add(index);
     }
@@ -128,11 +130,13 @@ function* extractUtf16Le(buffer, maxStringLength, asciiTerminators, scanComplete
     }
     const offset = index;
     let value = "";
+    let overflow = false;
     while (index + 1 < buffer.length && isPrintable(buffer[index]) && buffer[index + 1] === 0) {
       if (value.length < maxStringLength) value += String.fromCharCode(buffer[index]);
+      else overflow = true;
       index += 2;
     }
-    if (value.length >= MIN_STRING_LENGTH && (scanComplete || index + 1 < buffer.length)) {
+    if (!overflow && value.length >= MIN_STRING_LENGTH && (scanComplete || index + 1 < buffer.length)) {
       yield { encoding: "utf16le", offset, value };
     }
   }
