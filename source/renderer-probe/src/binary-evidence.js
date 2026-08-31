@@ -15,9 +15,7 @@ const MAX_STRING_LENGTH = 64 * 1024;
 
 export function extractPrintableStrings(buffer, { maxStringLength = DEFAULT_MAX_STRING_LENGTH, scanComplete = true } = {}) {
   if (!Buffer.isBuffer(buffer)) throw new TypeError("buffer 必须是 Buffer");
-  if (!Number.isSafeInteger(maxStringLength) || maxStringLength < MIN_STRING_LENGTH || maxStringLength > MAX_STRING_LENGTH) {
-    throw new RangeError(`maxStringLength 必须介于 ${MIN_STRING_LENGTH} 和 ${MAX_STRING_LENGTH}`);
-  }
+  validateMaxStringLength(maxStringLength);
   if (typeof scanComplete !== "boolean") throw new TypeError("scanComplete 必须是布尔值");
 
   const ascii = extractAscii(buffer, maxStringLength, scanComplete);
@@ -28,6 +26,7 @@ export function extractPrintableStrings(buffer, { maxStringLength = DEFAULT_MAX_
 export async function collectProtocolEvidence(files, { maxScanBytes = DEFAULT_MAX_SCAN_BYTES, maxStringLength = DEFAULT_MAX_STRING_LENGTH } = {}) {
   if (!Array.isArray(files)) throw new TypeError("files 必须是数组");
   if (!files.every(file => typeof file === "string")) throw new TypeError("files 必须仅包含字符串路径");
+  validateMaxStringLength(maxStringLength);
   if (!Number.isSafeInteger(maxScanBytes) || maxScanBytes < 0) throw new RangeError("maxScanBytes 必须是非负安全整数");
   if (maxScanBytes > DEFAULT_MAX_SCAN_BYTES) throw new RangeError(`maxScanBytes 不得超过 ${DEFAULT_MAX_SCAN_BYTES}`);
 
@@ -163,6 +162,12 @@ function sanitizePath(value) {
 
 function hasCredentialSignal(value) {
   return SECRET_SIGNAL.test(value) || JWT.test(value);
+}
+
+function validateMaxStringLength(value) {
+  if (!Number.isSafeInteger(value) || value < MIN_STRING_LENGTH || value > MAX_STRING_LENGTH) {
+    throw new RangeError(`maxStringLength 必须介于 ${MIN_STRING_LENGTH} 和 ${MAX_STRING_LENGTH}`);
+  }
 }
 
 function isUtf16Continuation(buffer, index, asciiTerminators) {

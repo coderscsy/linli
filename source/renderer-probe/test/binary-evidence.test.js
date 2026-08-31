@@ -38,6 +38,47 @@ test("omits printable runs that exceed the bounded string limit", () => {
   assert.throws(() => extractPrintableStrings(buffer, { maxStringLength: 64 * 1024 + 1 }), /必须介于/u);
 });
 
+test("rejects invalid maxStringLength at the collector boundary before reading files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
+  try {
+    const existing = join(root, "small.dll");
+    const unavailable = join(root, "missing.dll");
+    await writeFile(existing, "LivePlayerReply\0");
+
+    for (const [files, maxStringLength] of [
+      [[], 64 * 1024 + 1],
+      [[existing], 64 * 1024 + 1],
+      [[unavailable], 3],
+      [[unavailable], 4.5],
+    ]) {
+      await assert.rejects(
+        collectProtocolEvidence(files, { maxStringLength }),
+        error => error instanceof RangeError && /必须介于/u.test(error.message),
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid maxScanBytes at the collector boundary for empty and unreadable inputs", async () => {
+  const unavailable = join(tmpdir(), "olivia-binary-evidence-does-not-exist", "missing.dll");
+
+  for (const [files, maxScanBytes] of [
+    [[], -1],
+    [[], 0.5],
+    [[], 16 * 1024 * 1024 + 1],
+    [[unavailable], -1],
+    [[unavailable], 0.5],
+    [[unavailable], 16 * 1024 * 1024 + 1],
+  ]) {
+    await assert.rejects(
+      collectProtocolEvidence(files, { maxScanBytes }),
+      error => error instanceof RangeError && /maxScanBytes/u.test(error.message),
+    );
+  }
+});
+
 test("collects sorted, deduplicated protocol evidence and classifies paths", async () => {
   const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
   try {
