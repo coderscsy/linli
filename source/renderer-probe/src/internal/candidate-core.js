@@ -4,7 +4,7 @@ import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 
 const DEFAULT_LIMITS = Object.freeze({ maxFiles: 10_000, maxTotalBytes: 16 * 1024 * 1024 * 1024 });
-const DEFAULT_FS = { lstat, open, readdir, realpath, openFlags: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) };
+const DEFAULT_FS = { lstat: path => lstat(path, { bigint: true }), open, readdir, realpath, openFlags: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) };
 function comparePath(left, right) { return left < right ? -1 : left > right ? 1 : 0; }
 function samePath(left, right) { return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right; }
 function isInside(root, path) { const value = relative(root, path); return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !value.includes(`..${sep}`)); }
@@ -15,18 +15,28 @@ function relativeDisplay(root, path) {
 }
 function pathKey(path) { return path.toLowerCase(); }
 function fixedResult(status, missing = [], files = [], totalBytes = 0) { return { status, rendererRoot: "<candidate>/TPRender", executable: "<candidate>/TPRender/Binaries/Win64/Olivia.exe", files, missing: [...new Set(missing)].sort(comparePath), totalBytes }; }
-function safeStats(stats) { return Number.isSafeInteger(stats.size) && stats.size >= 0 && Number.isFinite(stats.mtimeMs); }
+function statSize(stats) {
+  if (typeof stats?.size === "bigint") return stats.size >= 0n && stats.size <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(stats.size) : undefined;
+  return Number.isSafeInteger(stats?.size) && stats.size >= 0 ? stats.size : undefined;
+}
+function reliableFileId(stats) {
+  const { dev, ino } = stats ?? {};
+  if (typeof dev !== typeof ino) return false;
+  if (typeof dev === "bigint") return dev !== 0n && ino !== 0n;
+  return typeof dev === "number" && Number.isSafeInteger(dev) && Number.isSafeInteger(ino) && dev !== 0 && ino !== 0;
+}
+function safeStats(stats) { return statSize(stats) !== undefined && reliableFileId(stats); }
 function sameIdentity(left, right) {
-  if (!left || !right || !safeStats(left) || !safeStats(right) || left.size !== right.size || left.mtimeMs !== right.mtimeMs) return false;
-  const inode = Number.isSafeInteger(left.dev) && Number.isSafeInteger(left.ino) && Number.isSafeInteger(right.dev) && Number.isSafeInteger(right.ino) && (left.dev !== 0 || left.ino !== 0 || right.dev !== 0 || right.ino !== 0);
-  return !inode || (left.dev === right.dev && left.ino === right.ino);
+  return safeStats(left) && safeStats(right) && typeof left.dev === typeof right.dev && typeof left.ino === typeof right.ino && left.dev === right.dev && left.ino === right.ino;
 }
 
 async function stablePath(path, kind, canonicalRoot, fsAdapter) {
   async function snapshot() {
     const stats = await fsAdapter.lstat(path);
     if (stats.isSymbolicLink()) return { reason: "candidate contains symbolic link" };
-    if ((kind === "directory" && !stats.isDirectory()) || (kind === "file" && !stats.isFile()) || !safeStats(stats)) return { reason: "candidate changed during validation" };
+    if ((kind === "directory" && !stats.isDirectory()) || (kind === "file" && !stats.isFile())) return { reason: "candidate changed during validation" };
+    if (!reliableFileId(stats)) return { reason: "identity_unavailable" };
+    if (statSize(stats) === undefined) return { reason: "candidate changed during validation" };
     const canonical = await fsAdapter.realpath(path);
     if (!isInside(canonicalRoot, canonical)) return { reason: "candidate path escapes renderer root" };
     return { canonical, stats };
@@ -90,7 +100,7 @@ async function openVerifiedFile(file, canonicalRoot, fsAdapter) {
   let handle;
   try {
     handle = await openReadonlyNoFollow(file.path, fsAdapter);
-    const handleStats = await handle.stat();
+    const handleStats = await handle.stat({ bigint: true });
     const after = await stablePath(file.path, "file", canonicalRoot, fsAdapter);
     if (after.reason || !samePath(after.canonical, file.canonical) || !sameIdentity(before.stats, handleStats) || !sameIdentity(before.stats, after.stats) || !sameIdentity(handleStats, after.stats)) {
       await handle.close().catch(() => {});
@@ -106,7 +116,7 @@ async function openVerifiedFile(file, canonicalRoot, fsAdapter) {
 async function hashOpenFile(file, canonicalRoot, remainingBytes, fsAdapter) {
   const opened = await openVerifiedFile(file, canonicalRoot, fsAdapter);
   if (opened.reason) return opened;
-  if (opened.stats.size > remainingBytes) { await opened.handle.close().catch(() => {}); return { reason: "candidate byte limit exceeded" }; }
+  if (statSize(opened.stats) > remainingBytes) { await opened.handle.close().catch(() => {}); return { reason: "candidate byte limit exceeded" }; }
   const hash = createHash("sha256");
   let size = 0;
   let header = Buffer.alloc(0);
@@ -125,9 +135,9 @@ async function hashOpenFile(file, canonicalRoot, remainingBytes, fsAdapter) {
       stream.once("close", () => { if (exceeded) resolveStream(); });
     });
     if (exceeded) return { reason: "candidate byte limit exceeded" };
-    const handleAfter = await opened.handle.stat();
+    const handleAfter = await opened.handle.stat({ bigint: true });
     const pathAfter = await stablePath(file.path, "file", canonicalRoot, fsAdapter);
-    if (pathAfter.reason || !sameIdentity(opened.stats, handleAfter) || !sameIdentity(opened.stats, pathAfter.stats) || !samePath(pathAfter.canonical, file.canonical) || size !== opened.stats.size) return { reason: pathAfter.reason ?? "candidate changed during validation" };
+    if (pathAfter.reason || !sameIdentity(opened.stats, handleAfter) || !sameIdentity(opened.stats, pathAfter.stats) || statSize(opened.stats) !== statSize(handleAfter) || statSize(opened.stats) !== statSize(pathAfter.stats) || !samePath(pathAfter.canonical, file.canonical) || size !== statSize(opened.stats)) return { reason: pathAfter.reason ?? "candidate changed during validation" };
     return { size, sha256: hash.digest("hex"), hasMz: header[0] === 0x4d && header[1] === 0x5a };
   } catch { return { reason: "candidate access error" }; }
   finally { await opened.handle.close().catch(() => {}); }
@@ -156,7 +166,7 @@ export async function validateRendererCandidateWithFs(executablePath, fsAdapter 
   for (const file of files) {
     const state = await stablePath(file.path, "file", rootState.canonical, fsAdapter);
     if (state.reason || !samePath(state.canonical, file.canonical) || !sameIdentity(state.stats, file.stats)) return fixedResult("incomplete", [state.reason ?? "candidate changed during validation"]);
-    plannedBytes += state.stats.size;
+    plannedBytes += statSize(state.stats);
     if (plannedBytes > maxTotalBytes) return fixedResult("incomplete", ["candidate byte limit exceeded"]);
   }
   const hashed = [];
