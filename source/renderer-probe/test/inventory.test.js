@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { scanRendererInventory } from "../src/inventory.js";
+import { scanRendererInventoryForTest } from "../test-support/inventory-test-seam.js";
 
 const marker = "ovilia_Win64_Development_15918";
 const manifest = `"AppState" { "appid" "4532590" "name" "BSide: Olivia Lin" "installdir" "BSide Olivia Lin Test" "buildid" "24943426" "InstalledDepots" { "4532591" { "manifest" "3483511100282414030" "size" "3690442569" } } }`;
@@ -106,19 +107,19 @@ test("continues when marker reading fails and emits a stable safe warning", asyn
     opendir,
     readFile: async (file, encoding) => {
       if (file === fixture.version) {
-        const error = new Error("secret should not appear");
-        error.code = "EACCES";
+        const error = new Error("x-token=secret aaa.bbb.ccc");
+        error.code = "x-token=secret";
         throw error;
       }
       return readFile(file, encoding);
     },
   };
   try {
-    const result = await scanRendererInventory({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    const result = await scanRendererInventoryForTest({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker }, fsAdapter);
     assert.deepEqual(result.markerHits, []);
     assert.deepEqual(result.warnings, [...result.warnings].sort());
-    assert.ok(result.warnings.some(warning => warning === "scan: access EACCES"));
-    assert.doesNotMatch(result.warnings.join("\n"), /secret/u);
+    assert.ok(result.warnings.some(warning => warning === "scan: access_error"));
+    assert.doesNotMatch(result.warnings.join("\n"), /secret|aaa\.bbb\.ccc/u);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -137,7 +138,7 @@ test("drops marker data when an injected adapter reports a post-read file replac
     },
   };
   try {
-    const result = await scanRendererInventory({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    const result = await scanRendererInventoryForTest({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker }, fsAdapter);
     assert.deepEqual(result.markerHits, []);
     assert.ok(result.warnings.some(warning => warning.includes("changed during read")));
   } finally {
@@ -159,9 +160,31 @@ test("drops a candidate when an injected adapter reports a directory replacement
     },
   };
   try {
-    const result = await scanRendererInventory({ roots: [fixture.candidate], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    const result = await scanRendererInventoryForTest({ roots: [fixture.candidate], steamAppsRoot: fixture.steamAppsRoot, marker }, fsAdapter);
     assert.deepEqual(result.candidates, []);
     assert.ok(result.warnings.some(warning => warning.includes("outside root") || warning.includes("changed")));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("production inventory API ignores an injected filesystem adapter", async () => {
+  const fixture = await createFixture();
+  const hostileAdapter = {
+    lstat: async () => { throw new Error("adapter must not be called"); },
+    realpath: async () => { throw new Error("adapter must not be called"); },
+    opendir: async () => { throw new Error("adapter must not be called"); },
+    readFile: async () => { throw new Error("adapter must not be called"); },
+  };
+  try {
+    const result = await scanRendererInventory({
+      roots: [fixture.game],
+      steamAppsRoot: fixture.steamAppsRoot,
+      marker,
+      fsAdapter: hostileAdapter,
+    });
+    assert.deepEqual(result.markerHits, [fixture.version]);
+    assert.equal(result.steam.appId, "4532590");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

@@ -45,8 +45,8 @@ async function stablePath(path, kind, canonicalRoot, fsAdapter, warnings) {
       return undefined;
     }
     return after.canonical;
-  } catch (error) {
-    addWarning(warnings, `access ${error?.code ?? "error"}`);
+  } catch {
+    addWarning(warnings, "access_error");
     return undefined;
   }
 }
@@ -71,8 +71,8 @@ async function canonicalRootFor(root, fsAdapter, warnings) {
       return undefined;
     }
     return secondCanonical;
-  } catch (error) {
-    addWarning(warnings, `access ${error?.code ?? "error"}`);
+  } catch {
+    addWarning(warnings, "access_error");
     return undefined;
   }
 }
@@ -87,8 +87,8 @@ async function walkFiles(root, onFile, warnings, fsAdapter) {
     let handle;
     try {
       handle = await fsAdapter.opendir(directory);
-    } catch (error) {
-      addWarning(warnings, `access ${error?.code ?? "error"}`);
+    } catch {
+      addWarning(warnings, "access_error");
       return;
     }
     const afterOpen = await stablePath(directory, "directory", canonicalRoot, fsAdapter, warnings);
@@ -113,8 +113,8 @@ async function walkFiles(root, onFile, warnings, fsAdapter) {
           if (canonical) await onFile(entryPath, canonical, () => stablePath(entryPath, "file", canonicalRoot, fsAdapter, warnings));
         }
       }
-    } catch (error) {
-      addWarning(warnings, `access ${error?.code ?? "error"}`);
+    } catch {
+      addWarning(warnings, "access_error");
     }
   }
 
@@ -130,13 +130,13 @@ async function readStableUtf8(file, initialCanonical, revalidate, fsAdapter, war
       return undefined;
     }
     return contents;
-  } catch (error) {
-    addWarning(warnings, `access ${error?.code ?? "error"}`);
+  } catch {
+    addWarning(warnings, "access_error");
     return undefined;
   }
 }
 
-export async function scanRendererInventory({ roots, steamAppsRoot, marker, fsAdapter = DEFAULT_FS }) {
+async function scanRendererInventoryWithFs({ roots, steamAppsRoot, marker }, fsAdapter) {
   const candidates = [];
   const markerHits = [];
   const warnings = [];
@@ -164,4 +164,13 @@ export async function scanRendererInventory({ roots, steamAppsRoot, marker, fsAd
     markerHits: markerHits.sort(),
     warnings: warnings.sort(),
   };
+}
+
+export async function scanRendererInventory({ roots, steamAppsRoot, marker }) {
+  return scanRendererInventoryWithFs({ roots, steamAppsRoot, marker }, DEFAULT_FS);
+}
+
+// The only supported consumer is test-support/inventory-test-seam.js.
+export async function scanRendererInventoryWithFsForTest(options, fsAdapter) {
+  return scanRendererInventoryWithFs(options, fsAdapter);
 }
