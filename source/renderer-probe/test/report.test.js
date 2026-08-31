@@ -79,6 +79,34 @@ test("marks ready only when at least one validation is complete", () => {
   assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, sourceCandidateId(candidate));
 });
 
+test("principal discovery never changes readiness enums or Steam identities but still redacts free evidence", () => {
+  const candidate = "C:\\Users\\complete\\game\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const report = buildStage1AReport(blockedInput({
+    inventory: {
+      ...blockedInput().inventory,
+      roots: [
+        "C:\\Users\\candidate_ready\\scan",
+        "C:\\Users\\4532590\\scan",
+        "C:\\Users\\messages\\scan",
+      ],
+      candidates: [candidate],
+    },
+    protocolEvidence: {
+      files: [],
+      markers: [],
+      messages: [{ value: "complete", encoding: "ascii", offset: 1 }],
+      paths: [],
+    },
+    validations: [{ status: "complete", executable: candidate, files: [], missing: [], totalBytes: 1 }],
+  }));
+
+  assert.equal(report.status, "candidate_ready");
+  assert.equal(report.validations[0].status, "complete");
+  assert.equal(report.inventory.steam.appId, "4532590");
+  assert.equal(report.inventory.steam.depots[0].depotId, "4532591");
+  assert.equal(report.protocolEvidence.messages[0].value, "[PRINCIPAL_REDACTED]");
+});
+
 test("rejects forged complete validations without a matching inventory candidate", () => {
   const candidate = "I:\\candidate-a\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
   const other = "I:\\candidate-b\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
@@ -216,6 +244,8 @@ test("removes embedded Windows, UNC, Unix, user, and credential-bearing paths fr
         matches: [
           { value: "LivePlayerStartNotify build=Z:\\Secret\\renderer.pdb", encoding: "ascii", offset: 1 },
           { value: "LivePlayerReply asset=\\\\server\\private\\renderer.pdb", encoding: "ascii", offset: 2 },
+          { value: "/secret", encoding: "ascii", offset: 3 },
+          { value: "file=/secret", encoding: "ascii", offset: 4 },
         ],
       }],
       markers: [{ file, value: "prefix file=/home/private/renderer.pdb suffix", offset: 1 }],
@@ -227,7 +257,7 @@ test("removes embedded Windows, UNC, Unix, user, and credential-bearing paths fr
   try {
     await writeStage1AReport(layout, report);
     const persisted = `${await readFile(layout.reportJson, "utf8")}\n${await readFile(layout.reportMarkdown, "utf8")}`;
-    assert.doesNotMatch(persisted, /Z:\\Secret|\\\\server\\private|\/home\/private|C:\\Users|private-user|top-secret|token=/ui);
+    assert.doesNotMatch(persisted, /Z:\\Secret|\\\\server\\private|\/home\/private|C:\\Users|private-user|top-secret|token=|\/secret/ui);
     assert.match(persisted, /\[(?:PATH_)?REDACTED\]|<absolute-path>/u);
   } finally {
     await rm(layout.root, { recursive: true, force: true });
@@ -339,6 +369,43 @@ test("canonicalization never calls getters or toJSON and stringifies BigInt and 
   }
 });
 
+test("public writer coerces arbitrary control fields and preserves only valid schema enums", async () => {
+  const layout = await createLayout();
+  try {
+    await writeStage1AReport(layout, {
+      generatedAt: "2026-08-31T10:00:00.000Z",
+      status: "launch_now",
+      nextAction: "launch a renderer",
+      inventory: { roots: ["C:\\Users\\candidate_ready\\scan"], steam },
+      protocolEvidence: { files: [], markers: [], messages: [{ value: "candidate_ready" }], paths: [] },
+      validations: [{ status: "launch_now" }],
+    });
+    const persisted = JSON.parse(await readFile(layout.reportJson, "utf8"));
+    assert.equal(persisted.status, "blocked_missing_renderer");
+    assert.equal(persisted.nextAction, "未找到结构完整且已验证的候选；不得进入 Stage 1B。");
+    assert.equal(persisted.validations[0].status, "incomplete");
+    assert.equal(persisted.inventory.steam.appId, "4532590");
+    assert.equal(persisted.protocolEvidence.messages[0].value, "[PRINCIPAL_REDACTED]");
+    assert.doesNotMatch(JSON.stringify(persisted), /launch_now|launch a renderer/u);
+
+    await writeStage1AReport(layout, {
+      generatedAt: "2026-08-31T10:00:00.000Z",
+      status: "candidate_ready",
+      nextAction: "untrusted action",
+      inventory: { roots: ["C:\\Users\\candidate_ready\\scan"], steam },
+      protocolEvidence: { files: [], markers: [], messages: [{ value: "candidate_ready" }], paths: [] },
+      validations: [{ status: "complete" }],
+    });
+    const ready = JSON.parse(await readFile(layout.reportJson, "utf8"));
+    assert.equal(ready.status, "candidate_ready");
+    assert.equal(ready.nextAction, "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。");
+    assert.equal(ready.validations[0].status, "complete");
+    assert.equal(ready.protocolEvidence.messages[0].value, "[PRINCIPAL_REDACTED]");
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
 test("uses unique staging files and never touches pre-existing fixed partial paths", async () => {
   const layout = await createLayout();
   await mkdir(layout.evidenceDir, { recursive: true });
@@ -417,6 +484,44 @@ test("exclusive transaction lock prevents a concurrent report writer", async () 
     await rm(layout.root, { recursive: true, force: true });
   }
 });
+
+for (const replaceAtInstall of [1, 2, 3]) {
+  test(`lock replacement during install ${replaceAtInstall} aborts commit and restores the old bundle`, async () => {
+    const layout = await createLayout();
+    await mkdir(layout.evidenceDir, { recursive: true });
+    const old = new Map([
+      [layout.binaryEvidenceJson, "old-binary"],
+      [layout.reportJson, "old-json"],
+      [layout.reportMarkdown, "old-markdown"],
+    ]);
+    for (const [file, contents] of old) await writeFile(file, contents);
+    const lockPath = join(layout.evidenceDir, ".stage1a-transaction.lock");
+    let installLinks = 0;
+    const linkWithLockReplacement = async (source, target) => {
+      await link(source, target);
+      if (/\.stage$/u.test(source) && ++installLinks === replaceAtInstall) {
+        await unlink(lockPath);
+        await writeFile(lockPath, `replacement-lock-${replaceAtInstall}`);
+      }
+    };
+    try {
+      await assert.rejects(writeStage1ABundleForTest(layout, {
+        protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
+        report: buildStage1AReport(blockedInput()),
+      }, { link: linkWithLockReplacement }), /transaction_lock_lost/u);
+      for (const [file, contents] of old) assert.equal(await readFile(file, "utf8"), contents);
+      assert.equal(await readFile(lockPath, "utf8"), `replacement-lock-${replaceAtInstall}`);
+      assert.deepEqual((await readdir(layout.evidenceDir)).sort(), [
+        ".stage1a-transaction.lock",
+        "binary-protocol-evidence.json",
+        "stage1a-report.json",
+        "stage1a-report.md",
+      ]);
+    } finally {
+      await rm(layout.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("a lock write failure removes only the lock file created by this transaction", async () => {
   const layout = await createLayout();

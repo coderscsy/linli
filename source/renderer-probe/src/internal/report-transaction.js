@@ -9,8 +9,9 @@ import { redactSecrets } from "../redaction.js";
 const LOCK_NAME = ".stage1a-transaction.lock";
 const SECRET_KEY = /^(authorization|cookie|set-cookie|x-token|token|access_token|api_key|model_gateway_token)$/iu;
 const CREDENTIAL_SIGNAL = /\b(?:authorization|cookie|set-cookie|x-token|model_gateway_token)\b|\bBearer\b|[?&](?:token|access_token|api_key|x-token)=|\b(?:token|access_token|api_key)\s*[:=]/iu;
-const EMBEDDED_ABSOLUTE_PATH = /(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])|(?<![A-Za-z0-9_>/])\/(?:[^/\s]+\/)+[^\s]*)/u;
+const EMBEDDED_ABSOLUTE_PATH = /(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])|(?<![A-Za-z0-9_>/])\/[^/\s]+(?:\/[^/\s]*)*)/u;
 const JWT = /\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/u;
+const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
 
 export const DEFAULT_TRANSACTION_FS = Object.freeze({ link, lstat, mkdir, open, randomUUID, realpath, unlink });
 
@@ -21,11 +22,28 @@ export function discoverSensitivePrincipals(value) {
 }
 
 export function canonicalizeForPersistence(value, principals = discoverSensitivePrincipals(value)) {
-  return canonicalize(redactSecrets(value), new WeakSet(), principals);
+  return canonicalize(redactSecrets(value), new WeakSet(), principals, [], undefined);
+}
+
+export function canonicalizeStage1AReportForPersistence(report, principals = discoverSensitivePrincipals(report)) {
+  const source = recordOrEmpty(redactSecrets(report));
+  if (typeof source.generatedAt !== "string") throw new Error("invalid_stage1a_report");
+  const status = source.status === "candidate_ready" ? "candidate_ready" : "blocked_missing_renderer";
+  const validations = Array.isArray(source.validations) ? source.validations.map(item => {
+    const validation = recordOrEmpty(item);
+    return { ...validation, status: VALIDATION_STATUS.has(validation.status) ? validation.status : "incomplete" };
+  }) : [];
+  const coerced = {
+    ...source,
+    status,
+    nextAction: stage1ANextAction(status),
+    validations,
+  };
+  return canonicalize(redactSecrets(coerced), new WeakSet(), principals, [], STAGE1A_SCHEMA);
 }
 
 export function createStage1AReportArtifacts(layout, report, principals = discoverSensitivePrincipals(report)) {
-  const safeReport = canonicalizeForPersistence(report, principals);
+  const safeReport = canonicalizeStage1AReportForPersistence(report, principals);
   const json = `${JSON.stringify(safeReport, null, 2)}\n`;
   const markdown = [
     "# Stage 1A Renderer Recovery Decision",
@@ -89,14 +107,16 @@ async function writeArtifactTransaction(layout, artifacts, fsAdapter) {
 
     for (const [index, artifact] of validated.artifacts.entries()) {
       await assertDirectoryStable(directory, fsAdapter);
-      await backupExistingTarget(artifact, validated, transactionId, index, directory, originals, fsAdapter);
+      await backupExistingTarget(artifact, validated, transactionId, index, directory, lock, originals, fsAdapter);
     }
 
     for (const item of staged) {
-      await installStagedTarget(item, directory, installs, fsAdapter);
+      await installStagedTarget(item, directory, lock, installs, fsAdapter);
     }
 
+    await assertLockOwned(lock, fsAdapter);
     await syncDirectoryBestEffort(validated.evidenceDir, fsAdapter);
+    await assertLockOwned(lock, fsAdapter);
     committed = true;
     for (const original of originals) {
       if (original.exists && original.linked) await unlinkIdentityMatched(original.backupPath, original.identity, fsAdapter);
@@ -187,7 +207,7 @@ async function createExclusiveFile(path, contents, fsAdapter) {
   }
 }
 
-async function backupExistingTarget(artifact, validated, transactionId, index, directory, originals, fsAdapter) {
+async function backupExistingTarget(artifact, validated, transactionId, index, directory, lock, originals, fsAdapter) {
   let identity;
   try {
     const stats = await fsAdapter.lstat(artifact.target, { bigint: true });
@@ -213,18 +233,22 @@ async function backupExistingTarget(artifact, validated, transactionId, index, d
     targetRemoved: false,
   };
   originals.push(original);
+  await assertLockOwned(lock, fsAdapter);
   await createIdentityLink(artifact.target, backupPath, identity, fsAdapter);
   original.linked = true;
+  await assertLockOwned(lock, fsAdapter);
   await assertDirectoryStable(directory, fsAdapter);
   if (!await pathHasIdentity(backupPath, identity, fsAdapter)) throw new Error("backup identity changed");
   if (!await pathHasIdentity(artifact.target, identity, fsAdapter)) throw new Error("formal target changed before backup removal");
   original.unlinkIntent = true;
+  await assertLockOwned(lock, fsAdapter);
   await removeIdentityPath(artifact.target, identity, fsAdapter);
   original.targetRemoved = true;
+  await assertLockOwned(lock, fsAdapter);
   await assertDirectoryStable(directory, fsAdapter);
 }
 
-async function installStagedTarget(item, directory, installs, fsAdapter) {
+async function installStagedTarget(item, directory, lock, installs, fsAdapter) {
   await assertDirectoryStable(directory, fsAdapter);
   if (!await pathHasIdentity(item.path, item.identity, fsAdapter)) throw new Error("stage identity changed");
   item.linkIntent = true;
@@ -232,15 +256,23 @@ async function installStagedTarget(item, directory, installs, fsAdapter) {
   item.stageUnlinkIntent = false;
   item.stageRemoved = false;
   installs.push(item);
+  await assertLockOwned(lock, fsAdapter);
   await createIdentityLink(item.path, item.target, item.identity, fsAdapter);
   item.installed = true;
+  await assertLockOwned(lock, fsAdapter);
   await assertDirectoryStable(directory, fsAdapter);
   if (!await pathHasIdentity(item.target, item.identity, fsAdapter)) throw new Error("installed identity changed");
   item.stageUnlinkIntent = true;
+  await assertLockOwned(lock, fsAdapter);
   await removeIdentityPath(item.path, item.identity, fsAdapter);
   item.stageRemoved = true;
+  await assertLockOwned(lock, fsAdapter);
   await assertDirectoryStable(directory, fsAdapter);
   if (!await pathHasIdentity(item.target, item.identity, fsAdapter)) throw new Error("installed identity changed");
+}
+
+async function assertLockOwned(lock, fsAdapter) {
+  if (!await pathHasIdentity(lock.path, lock.identity, fsAdapter)) throw new Error("transaction_lock_lost");
 }
 
 async function rollbackTransaction({ directory, installs, originals, staged, fsAdapter }) {
@@ -358,11 +390,11 @@ async function syncDirectoryBestEffort(path, fsAdapter) {
   }
 }
 
-function canonicalize(value, active, principals) {
+function canonicalize(value, active, principals, path, schema) {
   if (value === undefined) return null;
   if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") return sanitizeString(value, principals);
+  if (typeof value === "string") return schema?.protectValue(path, value) ? value : sanitizeString(value, principals);
   if (typeof value === "function" || typeof value === "symbol") return "[UNSUPPORTED]";
   if (!value || typeof value !== "object") return value;
   if (active.has(value)) return "[CIRCULAR]";
@@ -372,14 +404,19 @@ function canonicalize(value, active, principals) {
     if (Array.isArray(value)) {
       const items = Object.keys(descriptors)
         .filter(key => /^(0|[1-9]\d*)$/u.test(key) && descriptors[key].enumerable)
-        .map(key => Object.hasOwn(descriptors[key], "value") ? canonicalize(descriptors[key].value, active, principals) : "[UNREADABLE]");
+        .map(key => Object.hasOwn(descriptors[key], "value")
+          ? canonicalize(descriptors[key].value, active, principals, [...path, "*"], schema)
+          : "[UNREADABLE]");
       return items.sort((left, right) => compareText(canonicalBytes(left), canonicalBytes(right)));
     }
     const entries = [];
     for (const key of Object.keys(descriptors).filter(key => descriptors[key].enumerable).sort(compareText)) {
-      if (isSensitiveKey(key, principals)) continue;
+      const childPath = [...path, key];
+      if (!schema?.protectKey(childPath) && isSensitiveKey(key, principals)) continue;
       const descriptor = descriptors[key];
-      const item = Object.hasOwn(descriptor, "value") ? canonicalize(descriptor.value, active, principals) : "[UNREADABLE]";
+      const item = Object.hasOwn(descriptor, "value")
+        ? canonicalize(descriptor.value, active, principals, childPath, schema)
+        : "[UNREADABLE]";
       entries.push([key, item]);
     }
     return Object.fromEntries(entries);
@@ -389,6 +426,41 @@ function canonicalize(value, active, principals) {
     active.delete(value);
   }
 }
+
+const STAGE1A_SCHEMA = Object.freeze({
+  protectKey(path) {
+    const signature = path.join(".");
+    return /^(?:generatedAt|inventory|nextAction|protocolEvidence|status|validations)$/u.test(signature)
+      || /^inventory\.(?:candidates|markerHits|roots|steam|warnings)$/u.test(signature)
+      || /^inventory\.candidates\.\*\.(?:executable|sourceCandidateId)$/u.test(signature)
+      || /^inventory\.steam\.(?:appId|buildId|depots|installDir|name)$/u.test(signature)
+      || /^inventory\.steam\.depots\.\*\.(?:depotId|manifestId|size)$/u.test(signature)
+      || /^validations\.\*\.(?:executable|files|missing|rendererRoot|sourceCandidateId|status|totalBytes)$/u.test(signature)
+      || /^validations\.\*\.files\.\*\.(?:error|path|sha256|size)$/u.test(signature)
+      || /^protocolEvidence\.(?:files|markers|messages|paths)$/u.test(signature)
+      || /^protocolEvidence\.files\.\*\.(?:error|matches|path|sha256|size)$/u.test(signature)
+      || /^protocolEvidence\.files\.\*\.matches\.\*\.(?:encoding|file|offset|value)$/u.test(signature)
+      || /^protocolEvidence\.(?:markers|messages|paths)\.\*\.(?:encoding|file|offset|value)$/u.test(signature);
+  },
+  protectValue(path, value) {
+    const signature = path.join(".");
+    if (signature === "status") return value === "candidate_ready" || value === "blocked_missing_renderer";
+    if (signature === "validations.*.status") return VALIDATION_STATUS.has(value);
+    if (/^inventory\.steam\.(?:appId|buildId)$/u.test(signature)) return /^\d+$/u.test(value);
+    if (/^inventory\.steam\.depots\.\*\.(?:depotId|manifestId)$/u.test(signature)) return /^\d+$/u.test(value);
+    if (/^(?:inventory\.candidates|validations)\.\*\.sourceCandidateId$/u.test(signature)) return /^[a-f0-9]{64}$/u.test(value);
+    if (/^(?:protocolEvidence\.files|validations\.\*\.files)\.\*\.sha256$/u.test(signature)) return /^[a-f0-9]{64}$/u.test(value);
+    return false;
+  },
+});
+
+function stage1ANextAction(status) {
+  return status === "candidate_ready"
+    ? "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。"
+    : "未找到结构完整且已验证的候选；不得进入 Stage 1B。";
+}
+
+function recordOrEmpty(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
 
 function sanitizeString(value, principals) {
   if (value === "[REDACTED]" || CREDENTIAL_SIGNAL.test(value)) return "[REDACTED]";

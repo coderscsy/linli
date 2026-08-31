@@ -1,10 +1,16 @@
 import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 
-import { canonicalizeForPersistence, discoverSensitivePrincipals, writeStage1AReportTransaction } from "./internal/report-transaction.js";
+import {
+  canonicalizeForPersistence,
+  canonicalizeStage1AReportForPersistence,
+  discoverSensitivePrincipals,
+  writeStage1AReportTransaction,
+} from "./internal/report-transaction.js";
 import { redactSecrets } from "./redaction.js";
 
 const CANDIDATE_ID = /^[a-f0-9]{64}$/u;
+const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
 
 export function buildStage1AReport(input) {
   const safeInput = redactSecrets(input);
@@ -23,16 +29,16 @@ export function buildStage1AReport(input) {
     && candidateIds.has(validation.sourceCandidateId)
   ));
 
-  return sanitize({
+  return canonicalizeStage1AReportForPersistence({
     generatedAt: source.generatedAt,
-    inventory: normalizeInventory(inventorySource, candidates.entries, sanitize),
+    inventory: normalizeInventory(inventorySource, candidates.entries),
     nextAction: ready
       ? "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。"
       : "未找到结构完整且已验证的候选；不得进入 Stage 1B。",
     protocolEvidence: normalizeProtocolEvidence(source.protocolEvidence, sanitize),
     status: ready ? "candidate_ready" : "blocked_missing_renderer",
     validations,
-  });
+  }, principals);
 }
 
 export async function writeStage1AReport(layout, report) {
@@ -53,14 +59,14 @@ function normalizeCandidates(values) {
   return { entries, byNormalizedPath };
 }
 
-function normalizeInventory(inventory, candidates, sanitize) {
-  return sanitize({
+function normalizeInventory(inventory, candidates) {
+  return {
     candidates,
     markerHits: stringArray(inventory.markerHits).sort(compareText).map((_, index) => `<marker-hit-${index + 1}>/version.json`),
     roots: stringArray(inventory.roots).sort(compareText).map((_, index) => `<scan-root-${index + 1}>`),
     steam: inventory.steam ?? {},
     warnings: arrayOrEmpty(inventory.warnings),
-  });
+  };
 }
 
 function normalizeProtocolEvidence(value, sanitize) {
@@ -74,32 +80,32 @@ function normalizeProtocolEvidence(value, sanitize) {
   const files = sourceFiles.map((file, index) => {
     const output = { path: `<protocol-input-${index + 1}>` };
     for (const key of ["error", "matches", "sha256", "size"]) {
-      if (Object.hasOwn(file, key)) output[key] = sanitize(file[key]);
+      if (Object.hasOwn(file, key)) output[key] = file[key];
     }
     return output;
   });
-  return sanitize({
+  return {
     files,
     markers: normalizeProtocolRecords(evidence.markers, labels, false, sanitize),
     messages: normalizeProtocolRecords(evidence.messages, labels, false, sanitize),
     paths: normalizeProtocolRecords(evidence.paths, labels, true, sanitize),
-  });
+  };
 }
 
 function normalizeProtocolRecords(values, labels, pathValues, sanitize) {
   const normalized = arrayOrEmpty(values).map(item => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return sanitize(item);
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const record = {};
     for (const key of ["encoding", "offset", "value"]) {
       if (!Object.hasOwn(item, key)) continue;
-      record[key] = sanitize(item[key]);
+      record[key] = item[key];
     }
     if (Object.hasOwn(item, "file")) record.file = labels.get(stringOrEmpty(item.file)) ?? "<protocol-input-unknown>";
-    return sanitize(record);
+    return record;
   }).sort((left, right) => compareCanonical(left, right, sanitize));
   return normalized.map((record, index) => (
     pathValues && record && typeof record === "object" && !Array.isArray(record) && Object.hasOwn(record, "value")
-      ? sanitize({ ...record, value: `<binary-path-${index + 1}>` })
+      ? { ...record, value: `<binary-path-${index + 1}>` }
       : record
   ));
 }
@@ -107,9 +113,9 @@ function normalizeProtocolRecords(values, labels, pathValues, sanitize) {
 function normalizeValidations(values, candidateByPath, sanitize) {
   return arrayOrEmpty(values).map(value => {
     const validation = recordOrEmpty(value);
-    const output = {};
-    for (const key of ["files", "missing", "status", "totalBytes"]) {
-      if (Object.hasOwn(validation, key)) output[key] = sanitize(validation[key]);
+    const output = { status: VALIDATION_STATUS.has(validation.status) ? validation.status : "incomplete" };
+    for (const key of ["files", "missing", "totalBytes"]) {
+      if (Object.hasOwn(validation, key)) output[key] = validation[key];
     }
     const exactPath = normalizeAbsoluteCandidate(validation.executable);
     const exactId = exactPath ? candidateByPath.get(exactPath) : undefined;
@@ -118,11 +124,11 @@ function normalizeValidations(values, candidateByPath, sanitize) {
       : undefined;
     const sourceCandidateId = exactPath ? exactId : suppliedId;
     if (sourceCandidateId) output.sourceCandidateId = sourceCandidateId;
-    if (Object.hasOwn(validation, "rendererRoot")) output.rendererRoot = sanitize(validation.rendererRoot);
+    if (Object.hasOwn(validation, "rendererRoot")) output.rendererRoot = validation.rendererRoot;
     if (Object.hasOwn(validation, "executable")) output.executable = exactId
       ? "<matched-candidate>/TPRender/Binaries/Win64/Olivia.exe"
-      : sanitize(validation.executable);
-    return sanitize(output);
+      : validation.executable;
+    return output;
   }).sort((left, right) => compareCanonical(left, right, sanitize));
 }
 
