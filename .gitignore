@@ -15,5 +15,6 @@
 .vs/
 .DS_Store
 Thumbs.db
+.worktrees/
 release/*.exe
 release/*.zip
