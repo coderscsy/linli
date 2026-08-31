@@ -125,3 +125,42 @@ test("hashes the complete file but limits protocol scanning to maxScanBytes", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("omits ASCII and UTF-16LE runs that reach an incomplete scan window", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
+  try {
+    const ascii = join(root, "ascii.dll");
+    const utf16 = join(root, "utf16.dll");
+    const halfCodeUnit = join(root, "half-code-unit.dll");
+    const asciiMarker = Buffer.from("LivePlayerStartNotify", "ascii");
+    const utf16Marker = Buffer.from("render_ready", "utf16le");
+    await writeFile(ascii, Buffer.concat([asciiMarker, Buffer.from(" x-token=value", "ascii")]));
+    await writeFile(utf16, Buffer.concat([utf16Marker, Buffer.from(" x-token=value", "utf16le")]));
+    await writeFile(halfCodeUnit, Buffer.concat([utf16Marker, Buffer.from("x", "utf16le")]));
+
+    const [asciiEvidence, utf16Evidence, halfEvidence] = await Promise.all([
+      collectProtocolEvidence([ascii], { maxScanBytes: asciiMarker.length }),
+      collectProtocolEvidence([utf16], { maxScanBytes: utf16Marker.length }),
+      collectProtocolEvidence([halfCodeUnit], { maxScanBytes: utf16Marker.length + 1 }),
+    ]);
+    for (const evidence of [asciiEvidence, utf16Evidence, halfEvidence]) {
+      assert.deepEqual(evidence.markers, []);
+      assert.doesNotMatch(JSON.stringify(evidence), /LivePlayerStartNotify|render_ready/u);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects non-string paths without invoking user conversion", async () => {
+  let converted = false;
+  const malicious = {
+    toString() {
+      converted = true;
+      throw new Error("conversion attempted");
+    },
+  };
+
+  await assert.rejects(() => collectProtocolEvidence([malicious]), /仅包含字符串路径/u);
+  assert.equal(converted, false);
+});
