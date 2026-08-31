@@ -71,8 +71,9 @@ export function parseAppManifest(text) {
         if (!value || typeof value !== "object") throw new Error(`Steam manifest depot ${depotId} 无效`);
         const manifestId = requiredScalar(value, "manifest");
         const sizeText = requiredScalar(value, "size");
+        if (!/^(0|[1-9]\d*)$/u.test(sizeText)) throw new Error(`Steam manifest depot ${depotId} 的 size 无效`);
         const size = Number(sizeText);
-        if (!Number.isFinite(size)) throw new Error(`Steam manifest depot ${depotId} 的 size 无效`);
+        if (!Number.isSafeInteger(size)) throw new Error(`Steam manifest depot ${depotId} 的 size 无效`);
         return { depotId, manifestId, size };
       })
       .sort((left, right) => left.depotId.localeCompare(right.depotId));

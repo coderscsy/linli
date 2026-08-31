@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { lstat, mkdtemp, mkdir, opendir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
@@ -73,9 +73,96 @@ test("skips a symbolic link instead of traversing outside a supplied root", asyn
 
     const result = await scanRendererInventory({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker });
     assert.deepEqual(result.candidates, []);
-    assert.ok(result.warnings.some(warning => warning.includes(relative(fixture.game, link)) || warning.includes("outside-link")));
+    assert.ok(result.warnings.some(warning => warning.includes("skipped symbolic link")));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("rejects a root that is itself a symbolic link", async (t) => {
+  const fixture = await createFixture();
+  const link = join(fixture.root, "linked-root");
+  try {
+    try {
+      await symlink(fixture.game, link, "junction");
+    } catch (error) {
+      t.skip(`Windows denied symbolic-link fixture: ${error.code}`);
+      return;
+    }
+    const result = await scanRendererInventory({ roots: [link], steamAppsRoot: fixture.steamAppsRoot, marker });
+    assert.deepEqual(result.markerHits, []);
+    assert.ok(result.warnings.some(warning => warning.includes("skipped symbolic link")));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("continues when marker reading fails and emits a stable safe warning", async () => {
+  const fixture = await createFixture();
+  const fsAdapter = {
+    lstat,
+    realpath,
+    opendir,
+    readFile: async (file, encoding) => {
+      if (file === fixture.version) {
+        const error = new Error("secret should not appear");
+        error.code = "EACCES";
+        throw error;
+      }
+      return readFile(file, encoding);
+    },
+  };
+  try {
+    const result = await scanRendererInventory({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    assert.deepEqual(result.markerHits, []);
+    assert.deepEqual(result.warnings, [...result.warnings].sort());
+    assert.ok(result.warnings.some(warning => warning === "scan: access EACCES"));
+    assert.doesNotMatch(result.warnings.join("\n"), /secret/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("drops marker data when an injected adapter reports a post-read file replacement", async () => {
+  const fixture = await createFixture();
+  let versionRealpathCalls = 0;
+  const fsAdapter = {
+    lstat,
+    opendir,
+    readFile,
+    realpath: async file => {
+      if (file === fixture.version && ++versionRealpathCalls > 3) return join(fixture.root, "outside", "version.json");
+      return realpath(file);
+    },
+  };
+  try {
+    const result = await scanRendererInventory({ roots: [fixture.game], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    assert.deepEqual(result.markerHits, []);
+    assert.ok(result.warnings.some(warning => warning.includes("changed during read")));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("drops a candidate when an injected adapter reports a directory replacement", async () => {
+  const fixture = await createFixture();
+  const rendererDirectory = join(fixture.root, "candidate", "wallpaper", "TPRender");
+  let rendererRealpathCalls = 0;
+  const fsAdapter = {
+    lstat,
+    opendir,
+    readFile,
+    realpath: async file => {
+      if (file === rendererDirectory && ++rendererRealpathCalls > 1) return join(fixture.root, "outside", "TPRender");
+      return realpath(file);
+    },
+  };
+  try {
+    const result = await scanRendererInventory({ roots: [fixture.candidate], steamAppsRoot: fixture.steamAppsRoot, marker, fsAdapter });
+    assert.deepEqual(result.candidates, []);
+    assert.ok(result.warnings.some(warning => warning.includes("outside root") || warning.includes("changed")));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });

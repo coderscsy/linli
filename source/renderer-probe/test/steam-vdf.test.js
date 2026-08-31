@@ -25,3 +25,20 @@ test("rejects duplicate scalar keys", () => {
     /重复/u,
   );
 });
+
+test("rejects malformed, trailing, and duplicate-object VDF input", () => {
+  for (const input of [
+    `"AppState" { "appid" "4532590`,
+    `${manifest} trailing-garbage`,
+    `"AppState" { "appid" "4532590" "name" "x" "installdir" "x" "buildid" "1" "InstalledDepots" {} "InstalledDepots" {} }`,
+  ]) {
+    assert.throws(() => parseAppManifest(input));
+  }
+});
+
+test("accepts only decimal non-negative safe depot sizes", () => {
+  for (const size of ["", " ", "-1", "1.5", "1e3", "0x10", "9007199254740992"]) {
+    const invalid = manifest.replace('"3690442569"', `"${size}"`);
+    assert.throws(() => parseAppManifest(invalid), /size/u, size);
+  }
+});
