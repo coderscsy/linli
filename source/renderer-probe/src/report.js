@@ -2,27 +2,27 @@ import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
-  canonicalizeForPersistence,
   canonicalizeStage1AReportForPersistence,
-  discoverSensitivePrincipals,
+  discoverStage1APrincipals,
   writeStage1AReportTransaction,
 } from "./internal/report-transaction.js";
-import { redactSecrets } from "./redaction.js";
 
-const CANDIDATE_ID = /^[a-f0-9]{64}$/u;
+const CANDIDATE_ID = /^[A-Fa-f0-9]{64}$/u;
+const DECIMAL_ID = /^\d{1,20}$/u;
+const FIXED_HEX = /^[A-Fa-f0-9]{64}$/u;
 const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
+const MAX_ARRAY_ITEMS = 100_000;
 
 export function buildStage1AReport(input) {
-  const safeInput = redactSecrets(input);
-  const principals = discoverSensitivePrincipals(input);
-  const sanitize = value => canonicalizeForPersistence(value, principals);
-  const source = recordOrEmpty(safeInput);
-  if (typeof source.generatedAt !== "string") throw new TypeError("generatedAt 必须是字符串");
+  const source = recordOrEmpty(input);
+  const generatedAt = ownData(source, "generatedAt");
+  if (typeof generatedAt !== "string") throw new TypeError("generatedAt 必须是字符串");
 
-  const inventorySource = recordOrEmpty(source.inventory);
-  const candidates = normalizeCandidates(inventorySource.candidates);
+  const principals = discoverStage1APrincipals(input);
+  const inventorySource = recordOrEmpty(ownData(source, "inventory"));
+  const candidates = normalizeCandidates(ownData(inventorySource, "candidates"));
   const candidateIds = new Set(candidates.entries.map(candidate => candidate.sourceCandidateId));
-  const validations = normalizeValidations(source.validations, candidates.byNormalizedPath, sanitize);
+  const validations = normalizeValidations(ownData(source, "validations"), candidates.byNormalizedPath);
   const ready = candidates.entries.length > 0 && validations.some(validation => (
     validation.status === "complete"
     && typeof validation.sourceCandidateId === "string"
@@ -30,12 +30,9 @@ export function buildStage1AReport(input) {
   ));
 
   return canonicalizeStage1AReportForPersistence({
-    generatedAt: source.generatedAt,
+    generatedAt,
     inventory: normalizeInventory(inventorySource, candidates.entries),
-    nextAction: ready
-      ? "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。"
-      : "未找到结构完整且已验证的候选；不得进入 Stage 1B。",
-    protocolEvidence: normalizeProtocolEvidence(source.protocolEvidence, sanitize),
+    protocolEvidence: normalizeProtocolEvidence(ownData(source, "protocolEvidence")),
     status: ready ? "candidate_ready" : "blocked_missing_renderer",
     validations,
   }, principals);
@@ -62,74 +59,136 @@ function normalizeCandidates(values) {
 function normalizeInventory(inventory, candidates) {
   return {
     candidates,
-    markerHits: stringArray(inventory.markerHits).sort(compareText).map((_, index) => `<marker-hit-${index + 1}>/version.json`),
-    roots: stringArray(inventory.roots).sort(compareText).map((_, index) => `<scan-root-${index + 1}>`),
-    steam: inventory.steam ?? {},
-    warnings: arrayOrEmpty(inventory.warnings),
+    markerHits: stringArray(ownData(inventory, "markerHits")).sort(compareText).map((_, index) => `<marker-hit-${index + 1}>/version.json`),
+    roots: stringArray(ownData(inventory, "roots")).sort(compareText).map((_, index) => `<scan-root-${index + 1}>`),
+    steam: copySteamRaw(ownData(inventory, "steam")),
+    warnings: stringArray(ownData(inventory, "warnings")),
   };
 }
 
-function normalizeProtocolEvidence(value, sanitize) {
+function copySteamRaw(value) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyDecimalId(source, output, "appId");
+  copyDecimalId(source, output, "buildId");
+  copyString(source, output, "installDir");
+  copyString(source, output, "name");
+  const rawDepots = ownData(source, "depots");
+  if (Array.isArray(rawDepots)) {
+    output.depots = arrayValues(rawDepots).filter(isRecord).map(item => {
+      const depot = recordOrEmpty(item);
+      const copied = {};
+      copyDecimalId(depot, copied, "depotId");
+      copyDecimalId(depot, copied, "manifestId");
+      copySafeInteger(depot, copied, "size");
+      return copied;
+    });
+  }
+  return output;
+}
+
+function normalizeProtocolEvidence(value) {
   const evidence = recordOrEmpty(value);
-  const sourceFiles = arrayOrEmpty(evidence.files)
-    .map(item => recordOrEmpty(item))
-    .sort((left, right) => compareText(stringOrEmpty(left.path), stringOrEmpty(right.path)) || compareCanonical(left, right, sanitize));
+  const sourceFiles = arrayValues(ownData(evidence, "files"))
+    .map(copyProtocolFileRaw)
+    .filter(Boolean)
+    .sort((left, right) => compareText(stringOrEmpty(left.path), stringOrEmpty(right.path)) || compareRaw(left, right));
   const labels = new Map();
-  for (const [index, file] of sourceFiles.entries()) labels.set(stringOrEmpty(file.path), `<protocol-input-${index + 1}>`);
+  for (const [index, file] of sourceFiles.entries()) {
+    const path = stringOrEmpty(file.path);
+    if (!labels.has(path)) labels.set(path, `<protocol-input-${index + 1}>`);
+  }
 
   const files = sourceFiles.map((file, index) => {
     const output = { path: `<protocol-input-${index + 1}>` };
-    for (const key of ["error", "matches", "sha256", "size"]) {
-      if (Object.hasOwn(file, key)) output[key] = file[key];
-    }
+    copyString(file, output, "error");
+    const matches = ownData(file, "matches");
+    if (Array.isArray(matches)) output.matches = matches;
+    copyFixedHex(file, output, "sha256");
+    copySafeInteger(file, output, "size");
     return output;
   });
   return {
     files,
-    markers: normalizeProtocolRecords(evidence.markers, labels, false, sanitize),
-    messages: normalizeProtocolRecords(evidence.messages, labels, false, sanitize),
-    paths: normalizeProtocolRecords(evidence.paths, labels, true, sanitize),
+    markers: normalizeProtocolRecords(ownData(evidence, "markers"), labels, false),
+    messages: normalizeProtocolRecords(ownData(evidence, "messages"), labels, false),
+    paths: normalizeProtocolRecords(ownData(evidence, "paths"), labels, true),
   };
 }
 
-function normalizeProtocolRecords(values, labels, pathValues, sanitize) {
-  const normalized = arrayOrEmpty(values).map(item => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+function copyProtocolFileRaw(value) {
+  const source = recordOrEmpty(value);
+  if (source === EMPTY_RECORD) return undefined;
+  const output = {};
+  copyString(source, output, "error");
+  copyString(source, output, "path");
+  copyFixedHex(source, output, "sha256");
+  copySafeInteger(source, output, "size");
+  const matches = ownData(source, "matches");
+  if (Array.isArray(matches)) output.matches = normalizeProtocolRecords(matches, new Map(), false);
+  return output;
+}
+
+function normalizeProtocolRecords(values, labels, pathValues) {
+  const normalized = arrayValues(values).map(item => {
+    if (typeof item === "string") return item;
+    const source = recordOrEmpty(item);
+    if (source === EMPTY_RECORD) return undefined;
     const record = {};
-    for (const key of ["encoding", "offset", "value"]) {
-      if (!Object.hasOwn(item, key)) continue;
-      record[key] = item[key];
-    }
-    if (Object.hasOwn(item, "file")) record.file = labels.get(stringOrEmpty(item.file)) ?? "<protocol-input-unknown>";
+    copyString(source, record, "encoding");
+    copySafeInteger(source, record, "offset");
+    copyString(source, record, "value");
+    const file = ownData(source, "file");
+    if (typeof file === "string") record.file = labels.get(file) ?? (labels.size > 0 ? "<protocol-input-unknown>" : file);
     return record;
-  }).sort((left, right) => compareCanonical(left, right, sanitize));
+  }).filter(item => item !== undefined).sort(compareRaw);
   return normalized.map((record, index) => (
-    pathValues && record && typeof record === "object" && !Array.isArray(record) && Object.hasOwn(record, "value")
+    pathValues && record && typeof record === "object" && Object.hasOwn(record, "value")
       ? { ...record, value: `<binary-path-${index + 1}>` }
       : record
   ));
 }
 
-function normalizeValidations(values, candidateByPath, sanitize) {
-  return arrayOrEmpty(values).map(value => {
+function normalizeValidations(values, candidateByPath) {
+  return arrayValues(values).filter(isRecord).map(value => {
     const validation = recordOrEmpty(value);
-    const output = { status: VALIDATION_STATUS.has(validation.status) ? validation.status : "incomplete" };
-    for (const key of ["files", "missing", "totalBytes"]) {
-      if (Object.hasOwn(validation, key)) output[key] = validation[key];
-    }
-    const exactPath = normalizeAbsoluteCandidate(validation.executable);
+    const rawStatus = ownData(validation, "status");
+    const output = { status: VALIDATION_STATUS.has(rawStatus) ? rawStatus : "incomplete" };
+    const files = ownData(validation, "files");
+    if (Array.isArray(files)) output.files = arrayValues(files).filter(isRecord).map(copyValidationFileRaw);
+    const missing = ownData(validation, "missing");
+    if (Array.isArray(missing)) output.missing = stringArray(missing);
+    const totalBytes = ownData(validation, "totalBytes");
+    if (Number.isSafeInteger(totalBytes) && totalBytes >= 0) output.totalBytes = totalBytes;
+
+    const executable = ownData(validation, "executable");
+    const exactPath = normalizeAbsoluteCandidate(executable);
     const exactId = exactPath ? candidateByPath.get(exactPath) : undefined;
-    const suppliedId = typeof validation.sourceCandidateId === "string" && CANDIDATE_ID.test(validation.sourceCandidateId.toLowerCase())
-      ? validation.sourceCandidateId.toLowerCase()
+    const rawSuppliedId = ownData(validation, "sourceCandidateId");
+    const suppliedId = typeof rawSuppliedId === "string" && CANDIDATE_ID.test(rawSuppliedId)
+      ? rawSuppliedId.toLowerCase()
       : undefined;
     const sourceCandidateId = exactPath ? exactId : suppliedId;
     if (sourceCandidateId) output.sourceCandidateId = sourceCandidateId;
-    if (Object.hasOwn(validation, "rendererRoot")) output.rendererRoot = validation.rendererRoot;
-    if (Object.hasOwn(validation, "executable")) output.executable = exactId
+
+    const rendererRoot = ownData(validation, "rendererRoot");
+    if (typeof rendererRoot === "string") output.rendererRoot = rendererRoot;
+    if (typeof executable === "string") output.executable = exactId
       ? "<matched-candidate>/TPRender/Binaries/Win64/Olivia.exe"
-      : validation.executable;
+      : executable;
     return output;
-  }).sort((left, right) => compareCanonical(left, right, sanitize));
+  }).sort(compareRaw);
+}
+
+function copyValidationFileRaw(value) {
+  const source = recordOrEmpty(value);
+  if (source === EMPTY_RECORD) return undefined;
+  const output = {};
+  copyString(source, output, "error");
+  copyString(source, output, "path");
+  copyFixedHex(source, output, "sha256");
+  copySafeInteger(source, output, "size");
+  return output;
 }
 
 function normalizeAbsoluteCandidate(value) {
@@ -141,11 +200,63 @@ function hashCandidatePath(normalized) {
   return createHash("sha256").update(normalized, "utf8").digest("hex");
 }
 
-function compareCanonical(left, right, sanitize) {
-  return compareText(JSON.stringify(sanitize(left)), JSON.stringify(sanitize(right)));
+const EMPTY_RECORD = Object.freeze({});
+
+function recordOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : EMPTY_RECORD;
 }
-function arrayOrEmpty(value) { return Array.isArray(value) ? value : []; }
-function stringArray(value) { return arrayOrEmpty(value).filter(item => typeof item === "string"); }
-function recordOrEmpty(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
+
+function isRecord(value) { return value && typeof value === "object" && !Array.isArray(value); }
+
+function ownData(value, key) {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function copyString(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string") target[key] = value;
+}
+
+function copyDecimalId(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string" && DECIMAL_ID.test(value)) target[key] = value;
+}
+
+function copyFixedHex(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string" && FIXED_HEX.test(value)) target[key] = value;
+}
+
+function copySafeInteger(source, target, key) {
+  const value = ownData(source, key);
+  if (Number.isSafeInteger(value) && value >= 0) target[key] = value;
+}
+
+function arrayValues(value) {
+  if (!Array.isArray(value)) return [];
+  let length;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+    length = Object.hasOwn(descriptor ?? {}, "value") ? descriptor.value : undefined;
+  } catch {
+    return [];
+  }
+  if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY_ITEMS) return [];
+  const output = [];
+  for (let index = 0; index < length; index += 1) {
+    const item = ownData(value, String(index));
+    if (item !== undefined) output.push(item);
+  }
+  return output;
+}
+
+function stringArray(value) { return arrayValues(value).filter(item => typeof item === "string"); }
 function stringOrEmpty(value) { return typeof value === "string" ? value : ""; }
+function compareRaw(left, right) { return compareText(JSON.stringify(left), JSON.stringify(right)); }
 function compareText(left, right) { return left < right ? -1 : left > right ? 1 : 0; }

@@ -13,11 +13,11 @@ import { writeStage1ABundleForTest } from "../test-support/internal/report-test-
 const marker = "ovilia_Win64_Development_15918";
 const manifest = `"AppState" { "appid" "4532590" "name" "BSide: Olivia Lin" "installdir" "BSide Olivia Lin Test" "buildid" "24943426" "InstalledDepots" { "4532591" { "manifest" "3483511100282414030" "size" "3690442569" } } }`;
 
-async function createFixture({ candidate = "complete", includeManifest = true } = {}) {
+async function createFixture({ candidate = "complete", includeManifest = true, backupName = "backup root" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "olivia-renderer-cli-"));
   const dataRoot = join(root, "data root");
   const gameRoot = join(root, "game root");
-  const backupRoot = join(root, "backup root");
+  const backupRoot = join(root, backupName);
   const appDataRoot = join(root, "appdata root");
   const steamAppsRoot = join(root, "steamapps root");
   const version = join(gameRoot, "0.0.9.627", "plugins", "Studio", "..", "..", "..", "version.json");
@@ -128,6 +128,23 @@ test("complete candidate exits 0, writes sanitized evidence, and leaves every sc
     assert.deepEqual(Object.keys(summary.counts).sort(), ["candidates", "completeValidations", "protocolFiles"]);
     assert.doesNotMatch(`${result.stdout}\n${evidenceText}\n${JSON.stringify(report)}`, /never-report-this|authorization|Bearer |sycan|olivia-renderer-cli-/ui);
     assert.equal(await hashFiles(fixture.inputs).then(after => JSON.stringify(after)), JSON.stringify(before));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("candidate path with phone and JWT-like segments remains ready without leaking raw segments", async () => {
+  const phone = "13800138000";
+  const jwtLike = "aaa.bbb.ccc";
+  const fixture = await createFixture({ backupName: `backup ${phone} ${jwtLike}` });
+  try {
+    const result = await captureRun(fixture.args, { requiredDrive: fixture.requiredDrive });
+    const reportText = await readFile(join(fixture.dataRoot, "evidence", "stage1a-report.json"), "utf8");
+    const markdownText = await readFile(join(fixture.dataRoot, "evidence", "stage1a-report.md"), "utf8");
+    const evidenceText = await readFile(join(fixture.dataRoot, "evidence", "binary-protocol-evidence.json"), "utf8");
+    assert.equal(result.code, 0);
+    assert.equal(JSON.parse(reportText).status, "candidate_ready");
+    assert.doesNotMatch(`${result.stdout}\n${reportText}\n${markdownText}\n${evidenceText}`, /13800138000|aaa\.bbb\.ccc|backup 138/ui);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

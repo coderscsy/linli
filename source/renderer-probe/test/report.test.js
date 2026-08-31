@@ -79,14 +79,60 @@ test("marks ready only when at least one validation is complete", () => {
   assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, sourceCandidateId(candidate));
 });
 
+test("binds raw candidate paths containing phone and JWT-like segments without persisting them", async () => {
+  for (const segment of ["13800138000", "aaa.bbb.ccc"]) {
+    const layout = await createLayout();
+    const candidate = `I:\\private\\${segment}\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe`;
+    try {
+      const report = buildStage1AReport(blockedInput({
+        inventory: { ...blockedInput().inventory, candidates: [candidate] },
+        validations: [{ status: "complete", executable: candidate, files: [], missing: [], totalBytes: 1 }],
+      }));
+      assert.equal(report.status, "candidate_ready");
+      assert.equal(report.inventory.candidates[0].sourceCandidateId, sourceCandidateId(candidate));
+      assert.equal(report.validations[0].sourceCandidateId, sourceCandidateId(candidate));
+
+      await writeStage1AReport(layout, report);
+      const persisted = `${await readFile(layout.reportJson, "utf8")}\n${await readFile(layout.reportMarkdown, "utf8")}`;
+      assert.doesNotMatch(persisted, new RegExp(segment.replaceAll(".", "\\."), "u"));
+      assert.doesNotMatch(persisted, /I:\\private/ui);
+    } finally {
+      await rm(layout.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("preserves validated decimal Steam identities even when they look like phone numbers", () => {
+  const decimalIdentity = "13800138000";
+  const report = buildStage1AReport(blockedInput({
+    inventory: {
+      ...blockedInput().inventory,
+      steam: {
+        appId: decimalIdentity,
+        name: "safe-name",
+        installDir: "safe-install-dir",
+        buildId: decimalIdentity,
+        depots: [{ depotId: decimalIdentity, manifestId: decimalIdentity, size: 1 }],
+      },
+    },
+  }));
+
+  assert.equal(report.inventory.steam.appId, decimalIdentity);
+  assert.equal(report.inventory.steam.buildId, decimalIdentity);
+  assert.equal(report.inventory.steam.depots[0].depotId, decimalIdentity);
+  assert.equal(report.inventory.steam.depots[0].manifestId, decimalIdentity);
+});
+
 test("principal discovery never changes readiness enums or Steam identities but still redacts free evidence", () => {
-  const candidate = "C:\\Users\\complete\\game\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const candidate = "C:\\Users\\Stage\\game\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
   const report = buildStage1AReport(blockedInput({
     inventory: {
       ...blockedInput().inventory,
       roots: [
+        "C:\\Users\\Stage\\scan",
         "C:\\Users\\candidate_ready\\scan",
         "C:\\Users\\4532590\\scan",
+        "C:\\Users\\complete\\scan",
         "C:\\Users\\messages\\scan",
       ],
       candidates: [candidate],
@@ -94,7 +140,11 @@ test("principal discovery never changes readiness enums or Steam identities but 
     protocolEvidence: {
       files: [],
       markers: [],
-      messages: [{ value: "complete", encoding: "ascii", offset: 1 }],
+      messages: [
+        { value: "Stage", encoding: "ascii", offset: 1 },
+        { value: "complete", encoding: "ascii", offset: 2 },
+        { value: "candidate_ready", encoding: "ascii", offset: 3 },
+      ],
       paths: [],
     },
     validations: [{ status: "complete", executable: candidate, files: [], missing: [], totalBytes: 1 }],
@@ -104,7 +154,12 @@ test("principal discovery never changes readiness enums or Steam identities but 
   assert.equal(report.validations[0].status, "complete");
   assert.equal(report.inventory.steam.appId, "4532590");
   assert.equal(report.inventory.steam.depots[0].depotId, "4532591");
-  assert.equal(report.protocolEvidence.messages[0].value, "[PRINCIPAL_REDACTED]");
+  assert.equal(report.nextAction, "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。");
+  assert.deepEqual(report.protocolEvidence.messages.map(item => item.value), [
+    "[PRINCIPAL_REDACTED]",
+    "[PRINCIPAL_REDACTED]",
+    "[PRINCIPAL_REDACTED]",
+  ]);
 });
 
 test("rejects forged complete validations without a matching inventory candidate", () => {
@@ -347,7 +402,7 @@ test("canonical ordering ignores adversarial object-key insertion order", async 
   }
 });
 
-test("canonicalization never calls getters or toJSON and stringifies BigInt and cycles safely", async () => {
+test("strict report normalization drops unknown object graphs without calling getters or toJSON", async () => {
   const layout = await createLayout();
   let getterCalls = 0;
   let toJsonCalls = 0;
@@ -362,10 +417,210 @@ test("canonicalization never calls getters or toJSON and stringifies BigInt and 
     const persisted = await readFile(layout.reportJson, "utf8");
     assert.equal(getterCalls, 0);
     assert.equal(toJsonCalls, 0);
-    assert.match(persisted, /9007199254740993/u);
-    assert.match(persisted, /\[CIRCULAR\]|\[UNREADABLE\]/u);
+    assert.doesNotMatch(persisted, /metadata|9007199254740993|danger|toJSON|CIRCULAR|UNREADABLE/u);
   } finally {
     await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("strict DTO drops dotted, wildcard, sensitive, and unknown nested report fields", async () => {
+  const layout = await createLayout();
+  let getterCalls = 0;
+  let toJsonCalls = 0;
+  const unknown = {};
+  Object.defineProperty(unknown, "danger", { enumerable: true, get() { getterCalls += 1; throw new Error("must not run"); } });
+  Object.defineProperty(unknown, "toJSON", { enumerable: true, value() { toJsonCalls += 1; throw new Error("must not run"); } });
+  try {
+    await writeStage1AReport(layout, {
+      generatedAt: "2026-08-31T10:00:00.000Z",
+      status: "blocked_missing_renderer",
+      "inventory.steam.appId": "forged-dotted-value",
+      "*": { status: "candidate_ready", token: "wildcard-secret" },
+      inventory: {
+        roots: [],
+        candidates: [],
+        markerHits: [],
+        warnings: [],
+        token: "inventory-secret",
+        unknown,
+        steam: {
+          ...steam,
+          metadata: unknown,
+          path: "C:\\Users\\private\\secret",
+          token: "steam-secret",
+          "depots.*.depotId": "forged-nested-value",
+          depots: [{ ...steam.depots[0], token: "depot-secret", unknown }],
+        },
+      },
+      protocolEvidence: {
+        files: [{ path: "<protocol-input-1>", size: 1, sha256: "a".repeat(64), token: "file-secret", unknown }],
+        markers: [],
+        messages: [{ value: "safe-message", token: "record-secret", unknown }],
+        paths: [],
+        token: "protocol-secret",
+      },
+      validations: [{ status: "complete", token: "validation-secret", unknown }],
+      token: "root-secret",
+      unknown,
+    });
+
+    const persisted = await readFile(layout.reportJson, "utf8");
+    const parsed = JSON.parse(persisted);
+    assert.equal(getterCalls, 0);
+    assert.equal(toJsonCalls, 0);
+    assert.equal(parsed.inventory.steam.appId, steam.appId);
+    assert.equal(parsed.protocolEvidence.messages[0].value, "safe-message");
+    assert.doesNotMatch(persisted, /forged-dotted-value|forged-nested-value|wildcard-secret|inventory-secret|steam-secret|depot-secret|file-secret|record-secret|protocol-secret|validation-secret|root-secret|metadata|unknown|token|C:\\Users/ui);
+    assert.equal(Object.hasOwn(parsed, "inventory.steam.appId"), false);
+    assert.equal(Object.hasOwn(parsed, "*"), false);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("strict DTO drops malformed structural identities, hashes, and sizes", async () => {
+  const layout = await createLayout();
+  try {
+    await writeStage1AReport(layout, {
+      generatedAt: "2026-08-31T10:00:00.000Z",
+      status: "blocked_missing_renderer",
+      inventory: {
+        candidates: [null, "bad-record", { executable: "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe", sourceCandidateId: "not-a-hash" }],
+        markerHits: [],
+        roots: [],
+        warnings: [],
+        steam: {
+          appId: "12x",
+          buildId: "1".repeat(21),
+          depots: [null, "bad-record", { depotId: "-1", manifestId: "1.2", size: -1 }],
+        },
+      },
+      protocolEvidence: {
+        files: [null, "bad-record", { path: "<protocol-input-1>", sha256: "xyz", size: Number.MAX_SAFE_INTEGER + 1 }],
+        markers: [null, 42],
+        messages: [],
+        paths: [],
+      },
+      validations: [null, "bad-record", { status: "complete", sourceCandidateId: "g".repeat(64), totalBytes: -1 }],
+    });
+    const report = JSON.parse(await readFile(layout.reportJson, "utf8"));
+    assert.deepEqual(report.inventory.steam, { depots: [{}] });
+    assert.deepEqual(report.inventory.candidates, [{ executable: "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe" }]);
+    assert.deepEqual(report.protocolEvidence.files, [{ path: "<protocol-input-1>" }]);
+    assert.deepEqual(report.validations, [{ status: "complete" }]);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("builder drops malformed structural values before deterministic sorting", () => {
+  const report = buildStage1AReport(blockedInput({
+    inventory: {
+      ...blockedInput().inventory,
+      steam: {
+        appId: "invalid",
+        buildId: "1".repeat(21),
+        depots: [{ depotId: "1.2", manifestId: "-1", size: 1n }],
+      },
+    },
+    protocolEvidence: {
+      files: [
+        { path: "Z:\\b.dll", sha256: "bad", size: 1n },
+        { path: "Z:\\a.dll", sha256: "a".repeat(64), size: -1 },
+      ],
+      markers: [{ value: "safe", offset: 1n }, { value: "also-safe", offset: -1 }],
+      messages: [],
+      paths: [],
+    },
+    validations: [
+      { status: "complete", sourceCandidateId: "bad", totalBytes: 1n },
+      { status: "unknown", sourceCandidateId: "z".repeat(64), totalBytes: -1 },
+    ],
+  }));
+
+  assert.deepEqual(report.inventory.steam, { depots: [{}] });
+  assert.deepEqual(report.protocolEvidence.files, [
+    { path: "<protocol-input-1>", sha256: "a".repeat(64) },
+    { path: "<protocol-input-2>" },
+  ]);
+  assert.deepEqual(report.protocolEvidence.markers, [{ value: "also-safe" }, { value: "safe" }]);
+  assert.deepEqual(report.validations, [{ status: "complete" }, { status: "incomplete" }]);
+});
+
+test("bundle strict-normalizes arbitrary protocol evidence before persistence", async () => {
+  const layout = await createLayout();
+  try {
+    await writeStage1ABundleForTest(layout, {
+      protocolEvidence: {
+        files: [{ path: "<protocol-input-1>", size: 1, sha256: "a".repeat(64), token: "file-token" }],
+        markers: [{ value: "safe", token: "marker-token" }],
+        messages: [],
+        paths: [],
+        "files.*.sha256": "forged-dotted-hash",
+        "*": "forged-wildcard",
+        token: "root-token",
+      },
+      report: buildStage1AReport(blockedInput()),
+    });
+    const persisted = await readFile(layout.binaryEvidenceJson, "utf8");
+    assert.deepEqual(JSON.parse(persisted), {
+      files: [{ path: "<protocol-input-1>", sha256: "a".repeat(64), size: 1 }],
+      markers: [{ value: "safe" }],
+      messages: [],
+      paths: [],
+    });
+    assert.doesNotMatch(persisted, /file-token|marker-token|forged-dotted-hash|forged-wildcard|root-token|token/u);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("bundle boundary does not execute getters while reading its DTO", async () => {
+  const layout = await createLayout();
+  let getterCalls = 0;
+  const bundle = {};
+  Object.defineProperty(bundle, "protocolEvidence", { enumerable: true, get() { getterCalls += 1; throw new Error("must not run"); } });
+  Object.defineProperty(bundle, "report", { enumerable: true, get() { getterCalls += 1; throw new Error("must not run"); } });
+  try {
+    await assert.rejects(writeStage1ABundleForTest(layout, bundle), /invalid_stage1a_report/u);
+    assert.equal(getterCalls, 0);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("bundle strict normalization preserves byte determinism across evidence ordering", async () => {
+  const firstLayout = await createLayout();
+  const secondLayout = await createLayout();
+  const report = buildStage1AReport(blockedInput());
+  const firstEvidence = {
+    files: [
+      { path: "<protocol-input-2>", size: 2, sha256: "b".repeat(64) },
+      { path: "<protocol-input-1>", size: 1, sha256: "a".repeat(64) },
+    ],
+    markers: [{ value: "z", offset: 2 }, { value: "a", offset: 1 }],
+    messages: [],
+    paths: [],
+  };
+  const secondEvidence = {
+    paths: [],
+    messages: [],
+    markers: [{ offset: 1, value: "a" }, { offset: 2, value: "z" }],
+    files: [
+      { sha256: "a".repeat(64), size: 1, path: "<protocol-input-1>" },
+      { sha256: "b".repeat(64), size: 2, path: "<protocol-input-2>" },
+    ],
+  };
+  try {
+    await writeStage1ABundleForTest(firstLayout, { protocolEvidence: firstEvidence, report });
+    await writeStage1ABundleForTest(secondLayout, { protocolEvidence: secondEvidence, report });
+    assert.equal(
+      await readFile(firstLayout.binaryEvidenceJson, "utf8"),
+      await readFile(secondLayout.binaryEvidenceJson, "utf8"),
+    );
+  } finally {
+    await rm(firstLayout.root, { recursive: true, force: true });
+    await rm(secondLayout.root, { recursive: true, force: true });
   }
 });
 
@@ -401,6 +656,20 @@ test("public writer coerces arbitrary control fields and preserves only valid sc
     assert.equal(ready.nextAction, "已找到结构完整且已验证的候选；可单独规划 Stage 1B，但本阶段仍不得启动候选。");
     assert.equal(ready.validations[0].status, "complete");
     assert.equal(ready.protocolEvidence.messages[0].value, "[PRINCIPAL_REDACTED]");
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("public writer rejects an impossible generatedAt timestamp before creating artifacts", async () => {
+  const layout = await createLayout();
+  try {
+    await assert.rejects(writeStage1AReport(layout, {
+      generatedAt: "2026-02-30T10:00:00.000Z",
+      status: "blocked_missing_renderer",
+    }), /invalid_stage1a_report/u);
+    await assert.rejects(readFile(layout.reportJson, "utf8"));
+    await assert.rejects(readFile(layout.reportMarkdown, "utf8"));
   } finally {
     await rm(layout.root, { recursive: true, force: true });
   }

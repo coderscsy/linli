@@ -4,45 +4,32 @@ import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 import { assertContained } from "../layout.js";
-import { redactSecrets } from "../redaction.js";
 
 const LOCK_NAME = ".stage1a-transaction.lock";
-const SECRET_KEY = /^(authorization|cookie|set-cookie|x-token|token|access_token|api_key|model_gateway_token)$/iu;
 const CREDENTIAL_SIGNAL = /\b(?:authorization|cookie|set-cookie|x-token|model_gateway_token)\b|\bBearer\b|[?&](?:token|access_token|api_key|x-token)=|\b(?:token|access_token|api_key)\s*[:=]/iu;
 const EMBEDDED_ABSOLUTE_PATH = /(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])|(?<![A-Za-z0-9_>/])\/[^/\s]+(?:\/[^/\s]*)*)/u;
 const JWT = /\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/u;
+const MOBILE = /\b1\d{10}\b/u;
+const DECIMAL_ID = /^\d{1,20}$/u;
+const FIXED_HEX = /^[A-Fa-f0-9]{64}$/u;
+const GENERATED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const REPORT_STATUS = new Set(["candidate_ready", "blocked_missing_renderer"]);
 const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
+const MAX_ARRAY_ITEMS = 100_000;
 
 export const DEFAULT_TRANSACTION_FS = Object.freeze({ link, lstat, mkdir, open, randomUUID, realpath, unlink });
 
-export function discoverSensitivePrincipals(value) {
+export function discoverStage1APrincipals(value) {
   const principals = new Set();
-  collectSensitivePrincipals(value, new WeakSet(), principals);
+  collectStage1APrincipals(value, principals, new WeakSet());
   return principals;
 }
 
-export function canonicalizeForPersistence(value, principals = discoverSensitivePrincipals(value)) {
-  return canonicalize(redactSecrets(value), new WeakSet(), principals, [], undefined);
+export function canonicalizeStage1AReportForPersistence(report, principals = discoverStage1APrincipals(report)) {
+  return normalizeStage1AReport(report, principals);
 }
 
-export function canonicalizeStage1AReportForPersistence(report, principals = discoverSensitivePrincipals(report)) {
-  const source = recordOrEmpty(redactSecrets(report));
-  if (typeof source.generatedAt !== "string") throw new Error("invalid_stage1a_report");
-  const status = source.status === "candidate_ready" ? "candidate_ready" : "blocked_missing_renderer";
-  const validations = Array.isArray(source.validations) ? source.validations.map(item => {
-    const validation = recordOrEmpty(item);
-    return { ...validation, status: VALIDATION_STATUS.has(validation.status) ? validation.status : "incomplete" };
-  }) : [];
-  const coerced = {
-    ...source,
-    status,
-    nextAction: stage1ANextAction(status),
-    validations,
-  };
-  return canonicalize(redactSecrets(coerced), new WeakSet(), principals, [], STAGE1A_SCHEMA);
-}
-
-export function createStage1AReportArtifacts(layout, report, principals = discoverSensitivePrincipals(report)) {
+export function createStage1AReportArtifacts(layout, report, principals = discoverStage1APrincipals(report)) {
   const safeReport = canonicalizeStage1AReportForPersistence(report, principals);
   const json = `${JSON.stringify(safeReport, null, 2)}\n`;
   const markdown = [
@@ -66,8 +53,9 @@ export function createStage1AReportArtifacts(layout, report, principals = discov
 }
 
 export function createStage1ABundleArtifacts(layout, protocolEvidence, report) {
-  const principals = discoverSensitivePrincipals({ protocolEvidence, report });
-  const protocol = canonicalizeForPersistence(protocolEvidence, principals);
+  const principals = discoverStage1APrincipals(report);
+  collectProtocolEvidencePrincipals(protocolEvidence, principals, new WeakSet());
+  const protocol = canonicalizeTrusted(normalizeProtocolEvidence(protocolEvidence, principals));
   return [
     { target: layout.binaryEvidenceJson, expectedBasename: "binary-protocol-evidence.json", contents: `${JSON.stringify(protocol, null, 2)}\n` },
     ...createStage1AReportArtifacts(layout, report, principals),
@@ -78,8 +66,13 @@ export async function writeStage1AReportTransaction(layout, report, fsAdapter = 
   return writeArtifactTransaction(layout, createStage1AReportArtifacts(layout, report), fsAdapter);
 }
 
-export async function writeStage1ABundleTransaction(layout, { protocolEvidence, report }, fsAdapter = DEFAULT_TRANSACTION_FS) {
-  return writeArtifactTransaction(layout, createStage1ABundleArtifacts(layout, protocolEvidence, report), fsAdapter);
+export async function writeStage1ABundleTransaction(layout, bundle, fsAdapter = DEFAULT_TRANSACTION_FS) {
+  const source = recordOrEmpty(bundle);
+  return writeArtifactTransaction(layout, createStage1ABundleArtifacts(
+    layout,
+    ownData(source, "protocolEvidence"),
+    ownData(source, "report"),
+  ), fsAdapter);
 }
 
 async function writeArtifactTransaction(layout, artifacts, fsAdapter) {
@@ -390,69 +383,175 @@ async function syncDirectoryBestEffort(path, fsAdapter) {
   }
 }
 
-function canonicalize(value, active, principals, path, schema) {
-  if (value === undefined) return null;
-  if (typeof value === "bigint") return value.toString();
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") return schema?.protectValue(path, value) ? value : sanitizeString(value, principals);
-  if (typeof value === "function" || typeof value === "symbol") return "[UNSUPPORTED]";
-  if (!value || typeof value !== "object") return value;
-  if (active.has(value)) return "[CIRCULAR]";
-  active.add(value);
-  try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (Array.isArray(value)) {
-      const items = Object.keys(descriptors)
-        .filter(key => /^(0|[1-9]\d*)$/u.test(key) && descriptors[key].enumerable)
-        .map(key => Object.hasOwn(descriptors[key], "value")
-          ? canonicalize(descriptors[key].value, active, principals, [...path, "*"], schema)
-          : "[UNREADABLE]");
-      return items.sort((left, right) => compareText(canonicalBytes(left), canonicalBytes(right)));
-    }
-    const entries = [];
-    for (const key of Object.keys(descriptors).filter(key => descriptors[key].enumerable).sort(compareText)) {
-      const childPath = [...path, key];
-      if (!schema?.protectKey(childPath) && isSensitiveKey(key, principals)) continue;
-      const descriptor = descriptors[key];
-      const item = Object.hasOwn(descriptor, "value")
-        ? canonicalize(descriptor.value, active, principals, childPath, schema)
-        : "[UNREADABLE]";
-      entries.push([key, item]);
-    }
-    return Object.fromEntries(entries);
-  } catch {
-    return "[UNREADABLE]";
-  } finally {
-    active.delete(value);
+function normalizeStage1AReport(report, principals) {
+  const source = recordOrEmpty(report);
+  const generatedAt = ownData(source, "generatedAt");
+  if (!validGeneratedAt(generatedAt)) {
+    throw new Error("invalid_stage1a_report");
   }
+  const rawStatus = ownData(source, "status");
+  const status = REPORT_STATUS.has(rawStatus) ? rawStatus : "blocked_missing_renderer";
+  const sanitized = {
+    generatedAt,
+    inventory: normalizeInventory(ownData(source, "inventory"), principals),
+    protocolEvidence: normalizeProtocolEvidence(ownData(source, "protocolEvidence"), principals),
+    validations: normalizeValidations(ownData(source, "validations"), principals),
+  };
+  const finalReport = {
+    generatedAt: sanitized.generatedAt,
+    inventory: sanitized.inventory,
+    nextAction: stage1ANextAction(status),
+    protocolEvidence: sanitized.protocolEvidence,
+    status,
+    validations: sanitized.validations,
+  };
+  return canonicalizeTrusted(finalReport);
 }
 
-const STAGE1A_SCHEMA = Object.freeze({
-  protectKey(path) {
-    const signature = path.join(".");
-    return /^(?:generatedAt|inventory|nextAction|protocolEvidence|status|validations)$/u.test(signature)
-      || /^inventory\.(?:candidates|markerHits|roots|steam|warnings)$/u.test(signature)
-      || /^inventory\.candidates\.\*\.(?:executable|sourceCandidateId)$/u.test(signature)
-      || /^inventory\.steam\.(?:appId|buildId|depots|installDir|name)$/u.test(signature)
-      || /^inventory\.steam\.depots\.\*\.(?:depotId|manifestId|size)$/u.test(signature)
-      || /^validations\.\*\.(?:executable|files|missing|rendererRoot|sourceCandidateId|status|totalBytes)$/u.test(signature)
-      || /^validations\.\*\.files\.\*\.(?:error|path|sha256|size)$/u.test(signature)
-      || /^protocolEvidence\.(?:files|markers|messages|paths)$/u.test(signature)
-      || /^protocolEvidence\.files\.\*\.(?:error|matches|path|sha256|size)$/u.test(signature)
-      || /^protocolEvidence\.files\.\*\.matches\.\*\.(?:encoding|file|offset|value)$/u.test(signature)
-      || /^protocolEvidence\.(?:markers|messages|paths)\.\*\.(?:encoding|file|offset|value)$/u.test(signature);
-  },
-  protectValue(path, value) {
-    const signature = path.join(".");
-    if (signature === "status") return value === "candidate_ready" || value === "blocked_missing_renderer";
-    if (signature === "validations.*.status") return VALIDATION_STATUS.has(value);
-    if (/^inventory\.steam\.(?:appId|buildId)$/u.test(signature)) return /^\d+$/u.test(value);
-    if (/^inventory\.steam\.depots\.\*\.(?:depotId|manifestId)$/u.test(signature)) return /^\d+$/u.test(value);
-    if (/^(?:inventory\.candidates|validations)\.\*\.sourceCandidateId$/u.test(signature)) return /^[a-f0-9]{64}$/u.test(value);
-    if (/^(?:protocolEvidence\.files|validations\.\*\.files)\.\*\.sha256$/u.test(signature)) return /^[a-f0-9]{64}$/u.test(value);
-    return false;
-  },
-});
+function validGeneratedAt(value) {
+  if (typeof value !== "string" || !GENERATED_AT.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function normalizeInventory(value, principals) {
+  const source = recordOrEmpty(value);
+  return {
+    candidates: arrayValues(ownData(source, "candidates")).filter(isRecord).map(item => normalizeCandidate(item, principals)),
+    markerHits: normalizeFreeStringArray(ownData(source, "markerHits"), principals),
+    roots: normalizeFreeStringArray(ownData(source, "roots"), principals),
+    steam: normalizeSteam(ownData(source, "steam"), principals),
+    warnings: normalizeFreeStringArray(ownData(source, "warnings"), principals),
+  };
+}
+
+function normalizeCandidate(value, principals) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyFreeString(source, output, "executable", principals);
+  copyFixedHex(source, output, "sourceCandidateId");
+  return output;
+}
+
+function normalizeSteam(value, principals) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyDecimalId(source, output, "appId");
+  copyDecimalId(source, output, "buildId");
+  const depots = ownData(source, "depots");
+  if (Array.isArray(depots)) output.depots = arrayValues(depots).filter(isRecord).map(item => normalizeDepot(item));
+  copyFreeString(source, output, "installDir", principals);
+  copyFreeString(source, output, "name", principals);
+  return output;
+}
+
+function normalizeDepot(value) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyDecimalId(source, output, "depotId");
+  copyDecimalId(source, output, "manifestId");
+  copySafeInteger(source, output, "size");
+  return output;
+}
+
+function normalizeProtocolEvidence(value, principals) {
+  const source = recordOrEmpty(value);
+  return {
+    files: arrayValues(ownData(source, "files")).filter(isRecord).map(item => normalizeProtocolFile(item, principals)),
+    markers: normalizeProtocolEntries(ownData(source, "markers"), principals),
+    messages: normalizeProtocolEntries(ownData(source, "messages"), principals),
+    paths: normalizeProtocolEntries(ownData(source, "paths"), principals),
+  };
+}
+
+function normalizeProtocolFile(value, principals) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyFreeString(source, output, "error", principals);
+  const matches = ownData(source, "matches");
+  if (Array.isArray(matches)) output.matches = normalizeProtocolEntries(matches, principals);
+  copyFreeString(source, output, "path", principals);
+  copyFixedHex(source, output, "sha256");
+  copySafeInteger(source, output, "size");
+  return output;
+}
+
+function normalizeProtocolEntries(value, principals) {
+  return arrayValues(value).map(item => {
+    if (typeof item === "string") return sanitizeString(item, principals);
+    if (!isRecord(item)) return undefined;
+    const source = recordOrEmpty(item);
+    const output = {};
+    copyFreeString(source, output, "encoding", principals);
+    copyFreeString(source, output, "file", principals);
+    copySafeInteger(source, output, "offset");
+    copyFreeString(source, output, "value", principals);
+    return output;
+  }).filter(item => item !== undefined);
+}
+
+function normalizeValidations(value, principals) {
+  return arrayValues(value).filter(isRecord).map(item => {
+    const source = recordOrEmpty(item);
+    const rawStatus = ownData(source, "status");
+    const status = VALIDATION_STATUS.has(rawStatus) ? rawStatus : "incomplete";
+    const output = {};
+    copyFreeString(source, output, "executable", principals);
+    const files = ownData(source, "files");
+    if (Array.isArray(files)) output.files = arrayValues(files).filter(isRecord).map(file => normalizeValidationFile(file, principals));
+    const missing = ownData(source, "missing");
+    if (Array.isArray(missing)) output.missing = normalizeFreeStringArray(missing, principals);
+    copyFreeString(source, output, "rendererRoot", principals);
+    copyFixedHex(source, output, "sourceCandidateId");
+    output.status = status;
+    copySafeInteger(source, output, "totalBytes");
+    return output;
+  });
+}
+
+function normalizeValidationFile(value, principals) {
+  const source = recordOrEmpty(value);
+  const output = {};
+  copyFreeString(source, output, "error", principals);
+  copyFreeString(source, output, "path", principals);
+  copyFixedHex(source, output, "sha256");
+  copySafeInteger(source, output, "size");
+  return output;
+}
+
+function copyFreeString(source, target, key, principals) {
+  const value = ownData(source, key);
+  if (typeof value === "string") target[key] = sanitizeString(value, principals);
+}
+
+function copyDecimalId(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string" && DECIMAL_ID.test(value)) target[key] = value;
+}
+
+function copyFixedHex(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string" && FIXED_HEX.test(value)) target[key] = value;
+}
+
+function copySafeInteger(source, target, key) {
+  const value = ownData(source, key);
+  if (Number.isSafeInteger(value) && value >= 0) target[key] = value;
+}
+
+function normalizeFreeStringArray(value, principals) {
+  return arrayValues(value).filter(item => typeof item === "string").map(item => sanitizeString(item, principals));
+}
+
+function canonicalizeTrusted(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeTrusted).sort((left, right) => compareText(canonicalBytes(left), canonicalBytes(right)));
+  }
+  if (!value || typeof value !== "object") return value;
+  const output = {};
+  for (const key of Object.keys(value).sort(compareText)) output[key] = canonicalizeTrusted(value[key]);
+  return output;
+}
 
 function stage1ANextAction(status) {
   return status === "candidate_ready"
@@ -460,34 +559,147 @@ function stage1ANextAction(status) {
     : "未找到结构完整且已验证的候选；不得进入 Stage 1B。";
 }
 
-function recordOrEmpty(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
+const EMPTY_RECORD = Object.freeze({});
+
+function recordOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : EMPTY_RECORD;
+}
+
+function isRecord(value) { return value && typeof value === "object" && !Array.isArray(value); }
+
+function ownData(value, key) {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function arrayValues(value) {
+  if (!Array.isArray(value)) return [];
+  let length;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+    length = Object.hasOwn(descriptor ?? {}, "value") ? descriptor.value : undefined;
+  } catch {
+    return [];
+  }
+  if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY_ITEMS) return [];
+  const output = [];
+  for (let index = 0; index < length; index += 1) {
+    const item = ownData(value, String(index));
+    if (item !== undefined) output.push(item);
+  }
+  return output;
+}
 
 function sanitizeString(value, principals) {
-  if (value === "[REDACTED]" || CREDENTIAL_SIGNAL.test(value)) return "[REDACTED]";
+  if (value === "[REDACTED]" || CREDENTIAL_SIGNAL.test(value) || JWT.test(value) || MOBILE.test(value)) return "[REDACTED]";
   if (EMBEDDED_ABSOLUTE_PATH.test(value)) return "[PATH_REDACTED]";
   if (containsSensitivePrincipal(value, principals)) return "[PRINCIPAL_REDACTED]";
   return value;
 }
 
-function collectSensitivePrincipals(value, active, principals) {
-  if (typeof value === "string") {
-    for (const principal of principalsFromPath(value)) principals.add(principal.toLowerCase());
-    return;
+function collectStage1APrincipals(value, principals, active) {
+  const source = recordOrEmpty(value);
+  if (!beginVisit(source, active)) return;
+  try {
+    collectKnownStrings(source, ["generatedAt", "nextAction", "status"], principals);
+    collectInventoryPrincipals(ownData(source, "inventory"), principals, active);
+    collectProtocolEvidencePrincipals(ownData(source, "protocolEvidence"), principals, active);
+    collectValidationPrincipals(ownData(source, "validations"), principals, active);
+  } finally {
+    active.delete(source);
   }
-  if (!value || typeof value !== "object" || active.has(value)) return;
+}
+
+function collectInventoryPrincipals(value, principals, active) {
+  const source = recordOrEmpty(value);
+  if (!beginVisit(source, active)) return;
+  try {
+    for (const key of ["markerHits", "roots", "warnings"]) collectStringArrayPrincipals(ownData(source, key), principals);
+    for (const item of arrayValues(ownData(source, "candidates"))) {
+      if (typeof item === "string") addStringPrincipals(item, principals);
+      else collectKnownStrings(recordOrEmpty(item), ["executable", "sourceCandidateId"], principals);
+    }
+    const steam = recordOrEmpty(ownData(source, "steam"));
+    collectKnownStrings(steam, ["appId", "buildId", "installDir", "name"], principals);
+    for (const depot of arrayValues(ownData(steam, "depots"))) {
+      collectKnownStrings(recordOrEmpty(depot), ["depotId", "manifestId"], principals);
+    }
+  } finally {
+    active.delete(source);
+  }
+}
+
+function collectProtocolEvidencePrincipals(value, principals, active) {
+  const source = recordOrEmpty(value);
+  if (!beginVisit(source, active)) return;
+  try {
+    for (const file of arrayValues(ownData(source, "files"))) {
+      const record = recordOrEmpty(file);
+      collectKnownStrings(record, ["error", "path", "sha256"], principals);
+      collectProtocolEntryPrincipals(ownData(record, "matches"), principals, active);
+    }
+    for (const key of ["markers", "messages", "paths"]) {
+      collectProtocolEntryPrincipals(ownData(source, key), principals, active);
+    }
+  } finally {
+    active.delete(source);
+  }
+}
+
+function collectProtocolEntryPrincipals(value, principals, active) {
+  if (!Array.isArray(value) || active.has(value)) return;
   active.add(value);
   try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const key of Object.keys(descriptors)) {
-      for (const principal of principalsFromPath(key)) principals.add(principal.toLowerCase());
-      const descriptor = descriptors[key];
-      if (Object.hasOwn(descriptor, "value")) collectSensitivePrincipals(descriptor.value, active, principals);
+    for (const item of arrayValues(value)) {
+      if (typeof item === "string") addStringPrincipals(item, principals);
+      else collectKnownStrings(recordOrEmpty(item), ["encoding", "file", "value"], principals);
     }
-  } catch {
-    // Uninspectable objects contribute no principals and are later persisted as unreadable.
   } finally {
     active.delete(value);
   }
+}
+
+function collectValidationPrincipals(value, principals, active) {
+  if (!Array.isArray(value) || active.has(value)) return;
+  active.add(value);
+  try {
+    for (const item of arrayValues(value)) {
+      const record = recordOrEmpty(item);
+      collectKnownStrings(record, ["executable", "rendererRoot", "sourceCandidateId", "status"], principals);
+      collectStringArrayPrincipals(ownData(record, "missing"), principals);
+      for (const file of arrayValues(ownData(record, "files"))) {
+        collectKnownStrings(recordOrEmpty(file), ["error", "path", "sha256"], principals);
+      }
+    }
+  } finally {
+    active.delete(value);
+  }
+}
+
+function collectKnownStrings(source, keys, principals) {
+  for (const key of keys) {
+    const value = ownData(source, key);
+    if (typeof value === "string") addStringPrincipals(value, principals);
+  }
+}
+
+function collectStringArrayPrincipals(value, principals) {
+  for (const item of arrayValues(value)) if (typeof item === "string") addStringPrincipals(item, principals);
+}
+
+function addStringPrincipals(value, principals) {
+  for (const principal of principalsFromPath(value)) principals.add(principal.toLowerCase());
+}
+
+function beginVisit(value, active) {
+  if (value === EMPTY_RECORD || active.has(value)) return false;
+  active.add(value);
+  return true;
 }
 
 function principalsFromPath(value) {
@@ -500,11 +712,6 @@ function principalsFromPath(value) {
     for (const match of value.matchAll(pattern)) if (match[1]) found.push(match[1]);
   }
   return found;
-}
-
-function isSensitiveKey(key, principals) {
-  return SECRET_KEY.test(key) || CREDENTIAL_SIGNAL.test(key) || EMBEDDED_ABSOLUTE_PATH.test(key)
-    || JWT.test(key) || containsSensitivePrincipal(key, principals);
 }
 
 function containsSensitivePrincipal(value, principals) {
