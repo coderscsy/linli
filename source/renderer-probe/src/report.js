@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
@@ -7,7 +6,6 @@ import {
   writeStage1AReportTransaction,
 } from "./internal/report-transaction.js";
 
-const CANDIDATE_ID = /^[A-Fa-f0-9]{64}$/u;
 const DECIMAL_ID = /^\d{1,20}$/u;
 const FIXED_HEX = /^[A-Fa-f0-9]{64}$/u;
 const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
@@ -21,12 +19,12 @@ export function buildStage1AReport(input) {
   const principals = discoverStage1APrincipals(input);
   const inventorySource = recordOrEmpty(ownData(source, "inventory"));
   const candidates = normalizeCandidates(ownData(inventorySource, "candidates"));
-  const candidateIds = new Set(candidates.entries.map(candidate => candidate.sourceCandidateId));
+  const candidateLabels = new Set(candidates.entries.map(candidate => candidate.sourceCandidateId));
   const validations = normalizeValidations(ownData(source, "validations"), candidates.byNormalizedPath);
   const ready = candidates.entries.length > 0 && validations.some(validation => (
     validation.status === "complete"
     && typeof validation.sourceCandidateId === "string"
-    && candidateIds.has(validation.sourceCandidateId)
+    && candidateLabels.has(validation.sourceCandidateId)
   ));
 
   return canonicalizeStage1AReportForPersistence({
@@ -49,9 +47,9 @@ function normalizeCandidates(values) {
     .sort((left, right) => compareText(left.normalized, right.normalized));
   const byNormalizedPath = new Map();
   const entries = normalized.map((candidate, index) => {
-    const sourceCandidateId = hashCandidatePath(candidate.normalized);
-    byNormalizedPath.set(candidate.normalized, sourceCandidateId);
-    return { executable: `<candidate-${index + 1}>/TPRender/Binaries/Win64/Olivia.exe`, sourceCandidateId };
+    const sourceCandidateId = `candidate-${index + 1}`;
+    if (!byNormalizedPath.has(candidate.normalized)) byNormalizedPath.set(candidate.normalized, sourceCandidateId);
+    return { executable: `<${sourceCandidateId}>/TPRender/Binaries/Win64/Olivia.exe`, sourceCandidateId };
   });
   return { entries, byNormalizedPath };
 }
@@ -162,20 +160,22 @@ function normalizeValidations(values, candidateByPath) {
     if (Number.isSafeInteger(totalBytes) && totalBytes >= 0) output.totalBytes = totalBytes;
 
     const executable = ownData(validation, "executable");
-    const exactPath = normalizeAbsoluteCandidate(executable);
-    const exactId = exactPath ? candidateByPath.get(exactPath) : undefined;
-    const rawSuppliedId = ownData(validation, "sourceCandidateId");
-    const suppliedId = typeof rawSuppliedId === "string" && CANDIDATE_ID.test(rawSuppliedId)
-      ? rawSuppliedId.toLowerCase()
-      : undefined;
-    const sourceCandidateId = exactPath ? exactId : suppliedId;
+    const executablePath = normalizeAbsoluteCandidate(executable);
+    const sourceCandidatePath = normalizeAbsoluteCandidate(ownData(validation, "sourceCandidatePath"));
+    const bindingPath = executablePath ?? sourceCandidatePath;
+    const sourceCandidateId = bindingPath ? candidateByPath.get(bindingPath) : undefined;
     if (sourceCandidateId) output.sourceCandidateId = sourceCandidateId;
 
     const rendererRoot = ownData(validation, "rendererRoot");
-    if (typeof rendererRoot === "string") output.rendererRoot = rendererRoot;
-    if (typeof executable === "string") output.executable = exactId
-      ? "<matched-candidate>/TPRender/Binaries/Win64/Olivia.exe"
-      : executable;
+    if (sourceCandidateId) {
+      output.executable = `<${sourceCandidateId}>/TPRender/Binaries/Win64/Olivia.exe`;
+      output.rendererRoot = `<${sourceCandidateId}>/TPRender`;
+    } else {
+      const safeExecutable = normalizeSafeExecutable(executable);
+      const safeRendererRoot = normalizeSafeRendererRoot(rendererRoot);
+      if (safeExecutable) output.executable = safeExecutable;
+      if (safeRendererRoot) output.rendererRoot = safeRendererRoot;
+    }
     return output;
   }).sort(compareRaw);
 }
@@ -196,8 +196,18 @@ function normalizeAbsoluteCandidate(value) {
   return win32.resolve(value).replaceAll("/", "\\").toLowerCase();
 }
 
-function hashCandidatePath(normalized) {
-  return createHash("sha256").update(normalized, "utf8").digest("hex");
+function normalizeSafeExecutable(value) {
+  if (typeof value !== "string" || win32.isAbsolute(value)) return undefined;
+  const normalized = value.replaceAll("\\", "/");
+  return /^(?:<candidate(?:-[1-9]\d*)?>\/)?TPRender\/Binaries\/Win64\/Olivia\.exe$/u.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function normalizeSafeRendererRoot(value) {
+  if (typeof value !== "string" || win32.isAbsolute(value)) return undefined;
+  const normalized = value.replaceAll("\\", "/");
+  return /^(?:<candidate(?:-[1-9]\d*)?>\/)?TPRender$/u.test(normalized) ? normalized : undefined;
 }
 
 const EMPTY_RECORD = Object.freeze({});

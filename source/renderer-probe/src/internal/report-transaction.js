@@ -12,6 +12,10 @@ const JWT = /\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/u;
 const MOBILE = /\b1\d{10}\b/u;
 const DECIMAL_ID = /^\d{1,20}$/u;
 const FIXED_HEX = /^[A-Fa-f0-9]{64}$/u;
+const CANDIDATE_LABEL = /^candidate-[1-9]\d*$/u;
+const INVENTORY_CANDIDATE_EXECUTABLE = /^<candidate-[1-9]\d*>\/TPRender\/Binaries\/Win64\/Olivia\.exe$/u;
+const VALIDATION_EXECUTABLE = /^(?:<candidate(?:-[1-9]\d*)?>\/)?TPRender\/Binaries\/Win64\/Olivia\.exe$/u;
+const CANDIDATE_RENDERER_ROOT = /^(?:<candidate(?:-[1-9]\d*)?>\/)?TPRender$/u;
 const GENERATED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const REPORT_STATUS = new Set(["candidate_ready", "blocked_missing_renderer"]);
 const VALIDATION_STATUS = new Set(["complete", "incomplete", "invalid_pe"]);
@@ -417,7 +421,7 @@ function validGeneratedAt(value) {
 function normalizeInventory(value, principals) {
   const source = recordOrEmpty(value);
   return {
-    candidates: arrayValues(ownData(source, "candidates")).filter(isRecord).map(item => normalizeCandidate(item, principals)),
+    candidates: arrayValues(ownData(source, "candidates")).filter(isRecord).map(normalizeCandidate),
     markerHits: normalizeFreeStringArray(ownData(source, "markerHits"), principals),
     roots: normalizeFreeStringArray(ownData(source, "roots"), principals),
     steam: normalizeSteam(ownData(source, "steam"), principals),
@@ -425,11 +429,11 @@ function normalizeInventory(value, principals) {
   };
 }
 
-function normalizeCandidate(value, principals) {
+function normalizeCandidate(value) {
   const source = recordOrEmpty(value);
   const output = {};
-  copyFreeString(source, output, "executable", principals);
-  copyFixedHex(source, output, "sourceCandidateId");
+  copySafeCandidateString(source, output, "executable", INVENTORY_CANDIDATE_EXECUTABLE);
+  copyCandidateLabel(source, output, "sourceCandidateId");
   return output;
 }
 
@@ -496,13 +500,13 @@ function normalizeValidations(value, principals) {
     const rawStatus = ownData(source, "status");
     const status = VALIDATION_STATUS.has(rawStatus) ? rawStatus : "incomplete";
     const output = {};
-    copyFreeString(source, output, "executable", principals);
+    copySafeCandidateString(source, output, "executable", VALIDATION_EXECUTABLE);
     const files = ownData(source, "files");
     if (Array.isArray(files)) output.files = arrayValues(files).filter(isRecord).map(file => normalizeValidationFile(file, principals));
     const missing = ownData(source, "missing");
     if (Array.isArray(missing)) output.missing = normalizeFreeStringArray(missing, principals);
-    copyFreeString(source, output, "rendererRoot", principals);
-    copyFixedHex(source, output, "sourceCandidateId");
+    copySafeCandidateString(source, output, "rendererRoot", CANDIDATE_RENDERER_ROOT);
+    copyCandidateLabel(source, output, "sourceCandidateId");
     output.status = status;
     copySafeInteger(source, output, "totalBytes");
     return output;
@@ -522,6 +526,18 @@ function normalizeValidationFile(value, principals) {
 function copyFreeString(source, target, key, principals) {
   const value = ownData(source, key);
   if (typeof value === "string") target[key] = sanitizeString(value, principals);
+}
+
+function copySafeCandidateString(source, target, key, pattern) {
+  const value = ownData(source, key);
+  if (typeof value !== "string") return;
+  const normalized = value.replaceAll("\\", "/");
+  if (pattern.test(normalized)) target[key] = normalized;
+}
+
+function copyCandidateLabel(source, target, key) {
+  const value = ownData(source, key);
+  if (typeof value === "string" && CANDIDATE_LABEL.test(value)) target[key] = value;
 }
 
 function copyDecimalId(source, target, key) {

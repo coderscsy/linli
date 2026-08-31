@@ -61,7 +61,7 @@ async function createFixture({ candidate = "complete", includeManifest = true, b
     "--steamapps-root", steamAppsRoot,
   ];
   const requiredDrive = win32.parse(root).root.slice(0, 2);
-  return { root, dataRoot, gameRoot, backupRoot, appDataRoot, steamAppsRoot, appManifest, inputs, args, requiredDrive };
+  return { root, dataRoot, gameRoot, backupRoot, appDataRoot, steamAppsRoot, appManifest, executable, inputs, args, requiredDrive };
 }
 
 async function hashFiles(files) {
@@ -113,7 +113,7 @@ test("complete candidate exits 0, writes sanitized evidence, and leaves every sc
     assert.equal(result.stderr, "");
     assert.equal(report.status, "candidate_ready");
     assert.equal(report.generatedAt, "2026-08-31T10:00:00.000Z");
-    assert.match(report.inventory.candidates[0].sourceCandidateId, /^[a-f0-9]{64}$/u);
+    assert.equal(report.inventory.candidates[0].sourceCandidateId, "candidate-1");
     assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, report.inventory.candidates[0].sourceCandidateId);
     assert.match(await readFile(markdownPath, "utf8"), /candidate_ready/u);
     assert.deepEqual((await readdir(join(fixture.dataRoot, "evidence"))).sort(), [
@@ -142,9 +142,19 @@ test("candidate path with phone and JWT-like segments remains ready without leak
     const reportText = await readFile(join(fixture.dataRoot, "evidence", "stage1a-report.json"), "utf8");
     const markdownText = await readFile(join(fixture.dataRoot, "evidence", "stage1a-report.md"), "utf8");
     const evidenceText = await readFile(join(fixture.dataRoot, "evidence", "binary-protocol-evidence.json"), "utf8");
+    const normalized = win32.resolve(fixture.executable).replaceAll("/", "\\").toLowerCase();
+    const pathDigests = [fixture.executable, normalized, normalized.toUpperCase(), normalized.replaceAll("\\", "/")]
+      .map(value => createHash("sha256").update(value, "utf8").digest("hex"));
+    const combined = `${result.stdout}\n${reportText}\n${markdownText}\n${evidenceText}`;
     assert.equal(result.code, 0);
-    assert.equal(JSON.parse(reportText).status, "candidate_ready");
-    assert.doesNotMatch(`${result.stdout}\n${reportText}\n${markdownText}\n${evidenceText}`, /13800138000|aaa\.bbb\.ccc|backup 138/ui);
+    const report = JSON.parse(reportText);
+    assert.equal(report.status, "candidate_ready");
+    assert.equal(report.inventory.candidates[0].sourceCandidateId, "candidate-1");
+    assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, "candidate-1");
+    assert.doesNotMatch(combined, /13800138000|aaa\.bbb\.ccc|backup 138|sourceCandidatePath/ui);
+    for (const digest of pathDigests) assert.doesNotMatch(combined, new RegExp(digest, "iu"));
+    assert.match(combined, /candidate-1/u);
+    assert.doesNotMatch(combined, /candidate-2/u);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

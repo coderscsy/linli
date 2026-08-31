@@ -33,9 +33,20 @@ function blockedInput(overrides = {}) {
   };
 }
 
-function sourceCandidateId(path) {
+function candidatePathSha256(path) {
   const normalized = win32.resolve(path).replaceAll("/", "\\").toLowerCase();
   return createHash("sha256").update(normalized, "utf8").digest("hex");
+}
+
+function candidatePathDigests(path) {
+  const resolved = win32.resolve(path).replaceAll("/", "\\");
+  return [...new Set([
+    path,
+    resolved,
+    resolved.toLowerCase(),
+    resolved.toUpperCase(),
+    resolved.toLowerCase().replaceAll("\\", "/"),
+  ].map(value => createHash("sha256").update(value, "utf8").digest("hex")))];
 }
 
 async function createLayout() {
@@ -75,31 +86,90 @@ test("marks ready only when at least one validation is complete", () => {
   const inventory = { ...blockedInput().inventory, candidates: [candidate] };
   const report = buildStage1AReport(blockedInput({ inventory, validations }));
   assert.equal(report.status, "candidate_ready");
-  assert.equal(report.inventory.candidates[0].sourceCandidateId, sourceCandidateId(candidate));
-  assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, sourceCandidateId(candidate));
+  assert.equal(report.inventory.candidates[0].sourceCandidateId, "candidate-1");
+  assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, "candidate-1");
 });
 
-test("binds raw candidate paths containing phone and JWT-like segments without persisting them", async () => {
-  for (const segment of ["13800138000", "aaa.bbb.ccc"]) {
-    const layout = await createLayout();
-    const candidate = `I:\\private\\${segment}\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe`;
-    try {
-      const report = buildStage1AReport(blockedInput({
-        inventory: { ...blockedInput().inventory, candidates: [candidate] },
-        validations: [{ status: "complete", executable: candidate, files: [], missing: [], totalBytes: 1 }],
-      }));
-      assert.equal(report.status, "candidate_ready");
-      assert.equal(report.inventory.candidates[0].sourceCandidateId, sourceCandidateId(candidate));
-      assert.equal(report.validations[0].sourceCandidateId, sourceCandidateId(candidate));
+test("binds a sensitive raw candidate only to an ordinal without persisting paths or path digests", async () => {
+  const layout = await createLayout();
+  const phone = "13800138000";
+  const jwtLike = "aaa.bbb.ccc";
+  const candidate = `I:\\private\\${phone}\\${jwtLike}\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe`;
+  const candidateFileHash = "b".repeat(64);
+  const protocolFileHash = "c".repeat(64);
+  try {
+    const report = buildStage1AReport(blockedInput({
+      inventory: { ...blockedInput().inventory, candidates: [candidate] },
+      protocolEvidence: {
+        files: [{ path: "I:\\protocol\\NutLivePlayer.dll", sha256: protocolFileHash, size: 1 }],
+        markers: [],
+        messages: [],
+        paths: [],
+      },
+      validations: [{
+        status: "complete",
+        executable: candidate,
+        files: [{ path: candidate, sha256: candidateFileHash, size: 1 }],
+        missing: [],
+        totalBytes: 1,
+      }],
+    }));
+    assert.equal(report.status, "candidate_ready");
+    assert.equal(report.inventory.candidates[0].sourceCandidateId, "candidate-1");
+    assert.equal(report.validations[0].sourceCandidateId, "candidate-1");
+    assert.equal(report.validations[0].files[0].sha256, candidateFileHash);
+    assert.equal(report.protocolEvidence.files[0].sha256, protocolFileHash);
 
-      await writeStage1AReport(layout, report);
-      const persisted = `${await readFile(layout.reportJson, "utf8")}\n${await readFile(layout.reportMarkdown, "utf8")}`;
-      assert.doesNotMatch(persisted, new RegExp(segment.replaceAll(".", "\\."), "u"));
-      assert.doesNotMatch(persisted, /I:\\private/ui);
-    } finally {
-      await rm(layout.root, { recursive: true, force: true });
-    }
+    await writeStage1AReport(layout, report);
+    const serialized = JSON.stringify(report);
+    const persisted = `${await readFile(layout.reportJson, "utf8")}\n${await readFile(layout.reportMarkdown, "utf8")}`;
+    const combined = `${serialized}\n${persisted}`;
+    assert.doesNotMatch(combined, /13800138000|aaa\.bbb\.ccc|I:\\private/ui);
+    for (const digest of candidatePathDigests(candidate)) assert.doesNotMatch(combined, new RegExp(digest, "iu"));
+    assert.match(combined, /candidate-1/u);
+    assert.doesNotMatch(combined, /candidate-2/u);
+    assert.match(combined, new RegExp(candidateFileHash, "u"));
+    assert.match(combined, new RegExp(protocolFileHash, "u"));
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
   }
+});
+
+test("assigns candidate ordinals by canonical Windows path and binds validations to the matching ordinal", () => {
+  const candidateA = "I:\\alpha\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const candidateB = "I:\\Zulu\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const report = buildStage1AReport(blockedInput({
+    inventory: { ...blockedInput().inventory, candidates: [candidateB, candidateA] },
+    validations: [
+      { status: "complete", executable: "i:/ZULU/wallpaper/TPRender/Binaries/Win64/Olivia.exe" },
+      { status: "incomplete", executable: candidateA },
+    ],
+  }));
+
+  assert.deepEqual(report.inventory.candidates, [
+    { executable: "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe", sourceCandidateId: "candidate-1" },
+    { executable: "<candidate-2>/TPRender/Binaries/Win64/Olivia.exe", sourceCandidateId: "candidate-2" },
+  ]);
+  assert.equal(report.validations.find(item => item.status === "incomplete").sourceCandidateId, "candidate-1");
+  assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, "candidate-2");
+  assert.equal(report.status, "candidate_ready");
+});
+
+test("binds a CLI-style safe validation through its non-persistent sourceCandidatePath", () => {
+  const candidate = "I:\\candidate\\wallpaper\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const report = buildStage1AReport(blockedInput({
+    inventory: { ...blockedInput().inventory, candidates: [candidate] },
+    validations: [{
+      status: "complete",
+      executable: "<candidate>/TPRender/Binaries/Win64/Olivia.exe",
+      sourceCandidatePath: candidate,
+    }],
+  }));
+
+  assert.equal(report.status, "candidate_ready");
+  assert.equal(report.validations[0].sourceCandidateId, "candidate-1");
+  assert.equal(report.validations[0].executable, "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe");
+  assert.equal(Object.hasOwn(report.validations[0], "sourceCandidatePath"), false);
 });
 
 test("preserves validated decimal Steam identities even when they look like phone numbers", () => {
@@ -170,8 +240,10 @@ test("rejects forged complete validations without a matching inventory candidate
   const cases = [
     blockedInput({ validations: [{ status: "complete", executable: candidate }] }),
     blockedInput({ inventory: baseInventory, validations: [{ status: "complete", executable: other }] }),
-    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", sourceCandidateId: sourceCandidateId(other) }] }),
-    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", executable: other, sourceCandidateId: sourceCandidateId(candidate) }] }),
+    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", sourceCandidateId: "candidate-1" }] }),
+    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", sourceCandidateId: candidatePathSha256(candidate) }] }),
+    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", executable: other, sourceCandidateId: "candidate-1" }] }),
+    blockedInput({ inventory: baseInventory, validations: [{ status: "complete", sourceCandidatePath: other, sourceCandidateId: "candidate-1" }] }),
   ];
   for (const input of cases) {
     const report = buildStage1AReport(input);
@@ -508,6 +580,48 @@ test("strict DTO drops malformed structural identities, hashes, and sizes", asyn
     assert.deepEqual(report.inventory.candidates, [{ executable: "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe" }]);
     assert.deepEqual(report.protocolEvidence.files, [{ path: "<protocol-input-1>" }]);
     assert.deepEqual(report.validations, [{ status: "complete" }]);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("public writer keeps ordinal bindings but drops raw candidate paths and path digests", async () => {
+  const layout = await createLayout();
+  const candidate = "I:\\private\\13800138000\\aaa.bbb.ccc\\TPRender\\Binaries\\Win64\\Olivia.exe";
+  const digest = candidatePathSha256(candidate);
+  try {
+    await writeStage1AReport(layout, {
+      generatedAt: "2026-08-31T10:00:00.000Z",
+      status: "candidate_ready",
+      inventory: {
+        candidates: [{
+          executable: "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe",
+          sourceCandidateId: "candidate-1",
+          sourceCandidatePath: candidate,
+          pathDigest: digest,
+        }, {
+          executable: "TPRender/Binaries/Win64/Olivia.exe",
+        }],
+      },
+      validations: [{
+        status: "complete",
+        executable: candidate,
+        sourceCandidateId: digest,
+        sourceCandidatePath: candidate,
+        pathDigest: digest,
+        files: [{ path: "<candidate-file-1>", sha256: "d".repeat(64), size: 1 }],
+      }],
+    });
+
+    const persisted = await readFile(layout.reportJson, "utf8");
+    const report = JSON.parse(persisted);
+    assert.equal(report.inventory.candidates.find(item => item.sourceCandidateId === "candidate-1").executable, "<candidate-1>/TPRender/Binaries/Win64/Olivia.exe");
+    assert.equal(report.inventory.candidates.some(item => item.executable === "TPRender/Binaries/Win64/Olivia.exe"), false);
+    assert.equal(Object.hasOwn(report.validations[0], "sourceCandidateId"), false);
+    assert.equal(Object.hasOwn(report.validations[0], "executable"), false);
+    assert.equal(report.validations[0].files[0].sha256, "d".repeat(64));
+    assert.doesNotMatch(persisted, /13800138000|aaa\.bbb\.ccc|sourceCandidatePath|pathDigest/ui);
+    assert.doesNotMatch(persisted, new RegExp(digest, "iu"));
   } finally {
     await rm(layout.root, { recursive: true, force: true });
   }

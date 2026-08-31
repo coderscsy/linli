@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
@@ -87,9 +86,8 @@ export async function runCliCore(args, dependencies) {
 
   const validations = [];
   for (const executable of inventory.candidates) {
-    const sourceCandidateId = sourceCandidateIdForPath(executable);
     try {
-      validations.push({ ...(await dependencies.validateRendererCandidate(executable)), sourceCandidateId });
+      validations.push({ ...(await dependencies.validateRendererCandidate(executable)), sourceCandidatePath: executable });
     } catch {
       validations.push({
         status: "incomplete",
@@ -97,7 +95,7 @@ export async function runCliCore(args, dependencies) {
         executable: "<candidate>/TPRender/Binaries/Win64/Olivia.exe",
         files: [],
         missing: ["candidate_validation_failed"],
-        sourceCandidateId,
+        sourceCandidatePath: executable,
         totalBytes: 0,
       });
     }
@@ -162,9 +160,4 @@ function parseArgs(args) {
     appdataRoot: values.get("--appdata-root"),
     steamAppsRoot: values.get("--steamapps-root"),
   });
-}
-
-function sourceCandidateIdForPath(path) {
-  const normalized = win32.resolve(path).replaceAll("/", "\\").toLowerCase();
-  return createHash("sha256").update(normalized, "utf8").digest("hex");
 }
