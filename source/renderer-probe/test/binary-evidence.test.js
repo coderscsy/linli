@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -15,6 +16,18 @@ test("extracts ASCII and UTF-16LE markers with their byte offsets", () => {
   assert.deepEqual(extractPrintableStrings(buffer), [
     { encoding: "ascii", offset: 0, value: "xxxxLivePlayerStartNotify" },
     { encoding: "utf16le", offset: 26, value: "render_ready" },
+  ]);
+});
+
+test("extracts complete UTF-16LE strings at odd and even offsets after printable noise", () => {
+  const oddOffset = Buffer.concat([Buffer.from("X", "ascii"), Buffer.from("render_ready", "utf16le"), Buffer.from([0])]);
+  const evenOffset = Buffer.concat([Buffer.from("XY", "ascii"), Buffer.from("switch_ready", "utf16le"), Buffer.from([0])]);
+
+  assert.deepEqual(extractPrintableStrings(oddOffset), [
+    { encoding: "utf16le", offset: 1, value: "render_ready" },
+  ]);
+  assert.deepEqual(extractPrintableStrings(evenOffset), [
+    { encoding: "utf16le", offset: 2, value: "switch_ready" },
   ]);
 });
 
@@ -35,12 +48,13 @@ test("collects sorted, deduplicated protocol evidence and classifies paths", asy
     await writeFile(earlier, Buffer.from("LivePlayerReply\0LivePlayerReply\0", "ascii"));
 
     const evidence = await collectProtocolEvidence([later, earlier]);
-    assert.deepEqual(evidence.files.map(file => file.path), [earlier, later]);
+    assert.equal(evidence.files[0].path.endsWith("\\a.dll"), true);
+    assert.equal(evidence.files[1].path.endsWith("\\z.dll"), true);
     assert.deepEqual(evidence.messages, [
-      { encoding: "ascii", file: earlier, offset: 0, value: "LivePlayerReply" },
+      { encoding: "ascii", file: evidence.files[0].path, offset: 0, value: "LivePlayerReply" },
     ]);
     assert.deepEqual(evidence.paths, [
-      { encoding: "ascii", file: later, offset: 16, value: "C:\\wallpaper\\TPRender\\schema.proto" },
+      { encoding: "ascii", file: evidence.files[1].path, offset: 16, value: "C:\\wallpaper\\TPRender\\schema.proto" },
     ]);
     assert.equal(evidence.files[0].matches.length, 1);
     assert.match(evidence.files[0].sha256, /^[a-f0-9]{64}$/u);
@@ -50,17 +64,28 @@ test("collects sorted, deduplicated protocol evidence and classifies paths", asy
   }
 });
 
-test("protocol evidence removes credential fragments while preserving the protocol marker", async () => {
+test("protocol evidence omits every allowlisted string containing a credential signal", async () => {
   const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
   try {
-    const file = join(root, "NutLivePlayer.dll");
-    const credential = ["aaa", "bbb", "ccc"].join(".");
-    await writeFile(file, `Cmd.LivePlayerCtrlNotify.event_name x-token=${credential}`);
+    const signals = [
+      "x-token=value",
+      "Authorization: Bearer value",
+      "Cookie=value",
+      "model_gateway_token=value",
+      "?token=value",
+      "api_key=value",
+      ["aaa", "bbb", "ccc"].join("."),
+    ];
+    const files = await Promise.all(signals.map(async (signal, index) => {
+      const file = join(root, `NutLivePlayer-${index}.dll`);
+      await writeFile(file, `Cmd.LivePlayerCtrlNotify.event_name ${signal}`);
+      return file;
+    }));
 
-    const evidence = await collectProtocolEvidence([file]);
+    const evidence = await collectProtocolEvidence(files);
     const serialized = JSON.stringify(evidence);
-    assert.doesNotMatch(serialized, /x-token|aaa\.bbb\.ccc/u);
-    assert.match(serialized, /LivePlayerCtrlNotify/u);
+    assert.deepEqual(evidence.markers, []);
+    assert.doesNotMatch(serialized, /LivePlayerCtrlNotify|x-token|authorization|cookie|model_gateway_token|aaa\.bbb\.ccc/ui);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -72,12 +97,30 @@ test("returns deterministic safe read errors without exposing filesystem error t
     const unavailable = join(root, "missing.dll");
     const evidence = await collectProtocolEvidence([unavailable]);
 
-    assert.deepEqual(evidence, {
-      files: [{ error: "read_failed", path: unavailable }],
-      markers: [],
-      messages: [],
-      paths: [],
-    });
+    assert.equal(evidence.files.length, 1);
+    assert.equal(evidence.files[0].error, "read_failed");
+    assert.doesNotMatch(JSON.stringify(evidence), /sycan/u);
+    assert.deepEqual(evidence.markers, []);
+    assert.deepEqual(evidence.messages, []);
+    assert.deepEqual(evidence.paths, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("hashes the complete file but limits protocol scanning to maxScanBytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-binary-evidence-"));
+  try {
+    const file = join(root, "large.dll");
+    const content = Buffer.concat([Buffer.alloc(128 * 1024, 0), Buffer.from("LivePlayerStartNotify", "ascii")]);
+    await writeFile(file, content);
+
+    const evidence = await collectProtocolEvidence([file], { maxScanBytes: 1024 });
+    assert.deepEqual(evidence.markers, []);
+    assert.equal(evidence.files[0].size, content.length);
+    assert.equal(evidence.files[0].sha256, createHash("sha256").update(content).digest("hex"));
+    await assert.rejects(() => collectProtocolEvidence([file], { maxScanBytes: -1 }), /非负安全整数/u);
+    await assert.rejects(() => collectProtocolEvidence([file], { maxScanBytes: 17 * 1024 * 1024 }), /不得超过/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

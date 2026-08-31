@@ -8,24 +8,27 @@ const PROTOCOL_MARKER = /LivePlayer|RenderPlay|PerformanceManager|startPlayingMu
 const PATH_MARKER = /(?:[A-Z]:\\|wallpaper\\|TPRender\\|\.proto\b|\.pdb\b)/iu;
 const MESSAGE_MARKER = /Notify|Reply|event_name|event_param/iu;
 const JWT = /\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/u;
-const SECRET_FRAGMENT = /\b(?:x-token|authorization|cookie|set-cookie|model_gateway_token)\b|\bBearer\s+|[?&]token=/iu;
+const SECRET_SIGNAL = /\b(?:x-token|authorization|cookie|set-cookie|model_gateway_token)\b|\bBearer\b|[?&](?:token|api_key)=|\b(?:token|api_key)\s*[:=]/iu;
 const MIN_STRING_LENGTH = 4;
 const DEFAULT_MAX_STRING_LENGTH = 4096;
 const DEFAULT_MAX_SCAN_BYTES = 16 * 1024 * 1024;
+const MAX_STRING_LENGTH = 64 * 1024;
 
 export function extractPrintableStrings(buffer, { maxStringLength = DEFAULT_MAX_STRING_LENGTH } = {}) {
   if (!Buffer.isBuffer(buffer)) throw new TypeError("buffer 必须是 Buffer");
-  if (!Number.isSafeInteger(maxStringLength) || maxStringLength < MIN_STRING_LENGTH) {
-    throw new RangeError(`maxStringLength 必须至少为 ${MIN_STRING_LENGTH}`);
+  if (!Number.isSafeInteger(maxStringLength) || maxStringLength < MIN_STRING_LENGTH || maxStringLength > MAX_STRING_LENGTH) {
+    throw new RangeError(`maxStringLength 必须介于 ${MIN_STRING_LENGTH} 和 ${MAX_STRING_LENGTH}`);
   }
 
-  return [...extractAscii(buffer, maxStringLength), ...extractUtf16Le(buffer, maxStringLength)]
+  const ascii = extractAscii(buffer, maxStringLength);
+  return [...ascii.strings, ...extractUtf16Le(buffer, maxStringLength, ascii.terminators)]
     .sort(compareOffset);
 }
 
 export async function collectProtocolEvidence(files, { maxScanBytes = DEFAULT_MAX_SCAN_BYTES, maxStringLength = DEFAULT_MAX_STRING_LENGTH } = {}) {
   if (!Array.isArray(files)) throw new TypeError("files 必须是数组");
   if (!Number.isSafeInteger(maxScanBytes) || maxScanBytes < 0) throw new RangeError("maxScanBytes 必须是非负安全整数");
+  if (maxScanBytes > DEFAULT_MAX_SCAN_BYTES) throw new RangeError(`maxScanBytes 不得超过 ${DEFAULT_MAX_SCAN_BYTES}`);
 
   const collected = [];
   for (const file of [...files].sort()) {
@@ -48,7 +51,7 @@ export async function collectProtocolEvidence(files, { maxScanBytes = DEFAULT_MA
 }
 
 async function inspectFile(file, options) {
-  const safePath = sanitizeValue(String(file)) ?? "[REDACTED]";
+  const safePath = sanitizePath(String(file));
   try {
     const info = await stat(file);
     if (!info.isFile()) return { path: safePath, error: "read_failed" };
@@ -84,7 +87,9 @@ function hashAndReadBounded(file, maxScanBytes) {
   });
 }
 
-function* extractAscii(buffer, maxStringLength) {
+function extractAscii(buffer, maxStringLength) {
+  const strings = [];
+  const terminators = new Set();
   for (let index = 0; index < buffer.length;) {
     if (!isPrintable(buffer[index])) {
       index += 1;
@@ -96,13 +101,17 @@ function* extractAscii(buffer, maxStringLength) {
       if (value.length < maxStringLength) value += String.fromCharCode(buffer[index]);
       index += 1;
     }
-    if (value.length >= MIN_STRING_LENGTH) yield { encoding: "ascii", offset, value };
+    if (value.length >= MIN_STRING_LENGTH) {
+      strings.push({ encoding: "ascii", offset, value });
+      if (buffer[index] === 0) terminators.add(index);
+    }
   }
+  return { strings, terminators };
 }
 
-function* extractUtf16Le(buffer, maxStringLength) {
+function* extractUtf16Le(buffer, maxStringLength, asciiTerminators) {
   for (let index = 0; index + 1 < buffer.length;) {
-    if (!isPrintable(buffer[index]) || buffer[index + 1] !== 0 || (index > 0 && isPrintable(buffer[index - 1]))) {
+    if (!isPrintable(buffer[index]) || buffer[index + 1] !== 0 || asciiTerminators.has(index + 1) || isUtf16Continuation(buffer, index, asciiTerminators)) {
       index += 1;
       continue;
     }
@@ -122,31 +131,28 @@ function sanitizeMatch(match) {
 }
 
 function sanitizeValue(value) {
-  const boundary = earliestSensitiveBoundary(value);
-  const candidate = boundary === -1 ? value : value.slice(0, boundary).trimEnd();
-  if (candidate.length < MIN_STRING_LENGTH) return null;
-  const redacted = redactSecrets(candidate);
-  if (redacted !== "[REDACTED]") return redacted;
-
-  // Task 1 intentionally treats three dotted words like a JWT. Protocol names
-  // such as Cmd.LivePlayerCtrlNotify.event_name are not credentials, so make
-  // the separators unambiguous before applying that same redaction boundary.
-  const normalized = candidate.replaceAll(".", " ");
-  const normalizedRedaction = redactSecrets(normalized);
-  return normalizedRedaction === "[REDACTED]" ? null : normalizedRedaction;
+  const redacted = redactSecrets(value);
+  if (value.length < MIN_STRING_LENGTH || redacted === "[REDACTED]" || hasCredentialSignal(value)) return null;
+  return redacted;
 }
 
-function earliestSensitiveBoundary(value) {
-  const matches = [value.search(SECRET_FRAGMENT)];
-  for (const match of value.matchAll(new RegExp(JWT.source, "gu"))) {
-    if (!isProtocolDottedName(match[0])) matches.push(match.index);
-  }
-  const present = matches.filter(index => index >= 0);
-  return present.length === 0 ? -1 : Math.min(...present);
+function sanitizePath(value) {
+  const redacted = redactSecrets(value);
+  if (redacted === "[REDACTED]" || hasCredentialSignal(value)) return "[REDACTED]";
+  return value
+    .replace(/([A-Za-z]:[\\/]Users[\\/])[^\\/]+/iu, "$1[REDACTED]")
+    .replace(/([\\/]Users[\\/])[^\\/]+/iu, "$1[REDACTED]");
 }
 
-function isProtocolDottedName(value) {
-  return value.startsWith("Cmd.") && PROTOCOL_MARKER.test(value) && /event_(?:name|param)/iu.test(value);
+function hasCredentialSignal(value) {
+  return SECRET_SIGNAL.test(value) || JWT.test(value);
+}
+
+function isUtf16Continuation(buffer, index, asciiTerminators) {
+  return index >= 2
+    && isPrintable(buffer[index - 2])
+    && buffer[index - 1] === 0
+    && !asciiTerminators.has(index - 1);
 }
 
 function deduplicate(values, keyFor, compare = compareRecord) {
