@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import test from "node:test";
 
 import * as cliModule from "../src/cli.js";
 import { runCli } from "../src/cli.js";
+import { runCliForTest } from "../test-support/internal/cli-test-seam.js";
+import { writeStage1ABundleForTest } from "../test-support/internal/report-test-seam.js";
 
 const marker = "ovilia_Win64_Development_15918";
 const manifest = `"AppState" { "appid" "4532590" "name" "BSide: Olivia Lin" "installdir" "BSide Olivia Lin Test" "buildid" "24943426" "InstalledDepots" { "4532591" { "manifest" "3483511100282414030" "size" "3690442569" } } }`;
@@ -69,12 +71,24 @@ async function hashFiles(files) {
 async function captureRun(args, options) {
   let stdout = "";
   let stderr = "";
+  const result = await runCliForTest(args, {
+    ...options,
+    stdout: { write(chunk) { stdout += String(chunk); return true; } },
+    stderr: { write(chunk) { stderr += String(chunk); return true; } },
+    now: () => new Date("2026-08-31T10:00:00.000Z"),
+  });
+  return { code: result, stdout, stderr };
+}
+
+async function capturePublicRun(args, ignoredOptions) {
+  let stdout = "";
+  let stderr = "";
   const stdoutWrite = process.stdout.write;
   const stderrWrite = process.stderr.write;
   process.stdout.write = chunk => { stdout += String(chunk); return true; };
   process.stderr.write = chunk => { stderr += String(chunk); return true; };
   try {
-    const code = await runCli(args, options);
+    const code = await runCli(args, ignoredOptions);
     return { code, stdout, stderr };
   } finally {
     process.stdout.write = stdoutWrite;
@@ -89,6 +103,7 @@ test("complete candidate exits 0, writes sanitized evidence, and leaves every sc
     const result = await captureRun(fixture.args, { requiredDrive: fixture.requiredDrive });
     const reportPath = join(fixture.dataRoot, "evidence", "stage1a-report.json");
     const evidencePath = join(fixture.dataRoot, "evidence", "binary-protocol-evidence.json");
+    const markdownPath = join(fixture.dataRoot, "evidence", "stage1a-report.md");
     const report = JSON.parse(await readFile(reportPath, "utf8"));
     const evidenceText = await readFile(evidencePath, "utf8");
     const lines = result.stdout.trim().split(/\r?\n/u);
@@ -97,6 +112,15 @@ test("complete candidate exits 0, writes sanitized evidence, and leaves every sc
     assert.equal(result.code, 0);
     assert.equal(result.stderr, "");
     assert.equal(report.status, "candidate_ready");
+    assert.equal(report.generatedAt, "2026-08-31T10:00:00.000Z");
+    assert.match(report.inventory.candidates[0].sourceCandidateId, /^[a-f0-9]{64}$/u);
+    assert.equal(report.validations.find(item => item.status === "complete").sourceCandidateId, report.inventory.candidates[0].sourceCandidateId);
+    assert.match(await readFile(markdownPath, "utf8"), /candidate_ready/u);
+    assert.deepEqual((await readdir(join(fixture.dataRoot, "evidence"))).sort(), [
+      "binary-protocol-evidence.json",
+      "stage1a-report.json",
+      "stage1a-report.md",
+    ]);
     assert.equal(lines.length, 1);
     assert.deepEqual(Object.keys(summary).sort(), ["counts", "reportJson", "status"]);
     assert.equal(summary.status, "candidate_ready");
@@ -153,7 +177,7 @@ test("missing appmanifest exits 1 with only its safe basename", async () => {
 test("default production boundary rejects a C drive data root before creating reports", async () => {
   const fixture = await createFixture({ candidate: "none" });
   try {
-    const result = await captureRun(fixture.args);
+    const result = await capturePublicRun(fixture.args, { requiredDrive: fixture.requiredDrive });
     assert.equal(result.code, 1);
     assert.equal(result.stdout, "");
     assert.equal(result.stderr, "renderer-probe: unsafe data root\n");
@@ -188,7 +212,7 @@ test("rejects unknown, duplicate, missing, and flag-shaped values without echoin
   }
 });
 
-test("requiredDrive is not a CLI flag and test injection cannot target a non-temporary root", async () => {
+test("requiredDrive is test-support only and public runCli cannot be weakened", async () => {
   const fixture = await createFixture({ candidate: "none" });
   try {
     const flagResult = await captureRun([...fixture.args, "--required-drive", fixture.requiredDrive], { requiredDrive: fixture.requiredDrive });
@@ -201,29 +225,36 @@ test("requiredDrive is not a CLI flag and test injection cannot target a non-tem
     assert.equal(injectionResult.code, 1);
     assert.equal(injectionResult.stderr, "renderer-probe: unsafe data root\n");
 
-    const adapterResult = await captureRun(fixture.args, { requiredDrive: fixture.requiredDrive, stdout: { write() {} } });
-    assert.equal(adapterResult.code, 1);
-    assert.equal(adapterResult.stderr, "renderer-probe: invalid scan arguments\n");
+    const publicResult = await capturePublicRun(fixture.args, { requiredDrive: fixture.requiredDrive });
+    assert.equal(publicResult.code, 1);
+    assert.equal(publicResult.stderr, "renderer-probe: unsafe data root\n");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("a blocked binary-evidence partial preserves the existing formal evidence file", async () => {
+test("a CLI bundle-write failure leaves no current-run formal evidence or reports", async () => {
   const fixture = await createFixture({ candidate: "none" });
   const evidenceDir = join(fixture.dataRoot, "evidence");
-  const target = join(evidenceDir, "binary-protocol-evidence.json");
-  const partial = `${target}.partial`;
-  await mkdir(evidenceDir, { recursive: true });
-  await writeFile(target, "old-evidence");
-  await mkdir(partial);
+  let installRenames = 0;
   try {
-    const result = await captureRun(fixture.args, { requiredDrive: fixture.requiredDrive });
+    const result = await captureRun(fixture.args, {
+      requiredDrive: fixture.requiredDrive,
+      dependencies: {
+        writeEvidenceBundle: (layout, bundle) => writeStage1ABundleForTest(layout, bundle, {
+          rename: async (source, target) => {
+            if (/\.stage$/u.test(source) && ++installRenames === 3) throw new Error("injected third install failure");
+            return rename(source, target);
+          },
+        }),
+      },
+    });
     assert.equal(result.code, 1);
     assert.equal(result.stdout, "");
-    assert.equal(result.stderr, "renderer-probe: evidence write failed\n");
-    assert.equal(await readFile(target, "utf8"), "old-evidence");
-    assert.equal((await (await import("node:fs/promises")).lstat(partial)).isDirectory(), true);
+    assert.equal(result.stderr, "renderer-probe: report bundle write failed\n");
+    for (const name of ["binary-protocol-evidence.json", "stage1a-report.json", "stage1a-report.md"]) {
+      await assert.rejects(readFile(join(evidenceDir, name), "utf8"));
+    }
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
