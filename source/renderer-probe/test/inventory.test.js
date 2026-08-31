@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { scanRendererInventory } from "../src/inventory.js";
+import * as productionInventoryModule from "../src/inventory.js";
 import { scanRendererInventoryForTest } from "../test-support/inventory-test-seam.js";
 
 const marker = "ovilia_Win64_Development_15918";
@@ -188,4 +189,8 @@ test("production inventory API ignores an injected filesystem adapter", async ()
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("production inventory module exposes no adapter or test seam", () => {
+  assert.deepEqual(Object.keys(productionInventoryModule).sort(), ["scanRendererInventory"]);
 });
