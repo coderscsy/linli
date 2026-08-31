@@ -110,7 +110,10 @@ function Invoke-DsOnce {
         }
         throw
     }
-    $content = ($raw | ConvertFrom-Json).choices[0].message.content
+    $response = $raw | ConvertFrom-Json
+    $script:DsLastFinishReason = [string]$response.choices[0].finish_reason
+    $script:DsLastUsage = $response.usage
+    $content = $response.choices[0].message.content
     if ([string]::IsNullOrWhiteSpace($content)) { throw "DeepSeek returned empty content" }
     return $content.Trim()
 }
@@ -134,5 +137,31 @@ function Invoke-Ds {
             Write-Host ("DS RETRY attempt={0} reason={1}" -f ($attempt + 1), $message)
             Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1))
         }
+    }
+}
+
+function ConvertFrom-DsJson {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $clean = $Text.Trim()
+    if ($clean -match '(?s)^```(?:json)?\s*(.*?)\s*```$') { $clean = $Matches[1].Trim() }
+    if (-not ($clean.StartsWith("{") -and $clean.EndsWith("}"))) { throw "DeepSeek JSON envelope invalid" }
+    $value = $clean | ConvertFrom-Json
+    if ($null -eq $value -or $value -is [array]) { throw "DeepSeek JSON object required" }
+    return $value
+}
+
+function Invoke-DsJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$System,
+        [Parameter(Mandatory = $true)][string]$User
+    )
+    $raw = Invoke-Ds -System $System -User $User
+    try {
+        return ConvertFrom-DsJson -Text $raw
+    }
+    catch {
+        $repairSystem = $System + "`n`nThe previous output was not one strict JSON object. Return only the required JSON object."
+        $repairUser = $User + "`n`nInvalid previous output:`n" + $raw
+        return ConvertFrom-DsJson -Text (Invoke-Ds -System $repairSystem -User $repairUser)
     }
 }

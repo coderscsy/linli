@@ -1,0 +1,48 @@
+{
+    "schema":  "olivia-history.regression",
+    "version":  1,
+    "sourceSha256":  "1D1D7893A79E1C25D8802FD43619A8BE9D606102FB40D6730D0C5307AD9D04F4",
+    "sourceCount":  97,
+    "snapshotId":  "05ac68598a223a8955341602f37cb02760f1b2c574d2f4f4680ff60775966b0a",
+    "targetOrder":  84,
+    "targetPhraseFound":  true,
+    "exactRead":  {
+                      "hits":  194,
+                      "checks":  194,
+                      "rate":  1
+                  },
+    "historicalRecallAt5":  {
+                                "hits":  97,
+                                "checks":  97,
+                                "rate":  1
+                            },
+    "localLatencyMs":  {
+                           "readP50":  1.084,
+                           "readP95":  1.973,
+                           "searchP50":  1.365,
+                           "searchP95":  3.018
+                       },
+    "modelStage":  {
+                       "plannerCalls":  2,
+                       "reconcileCalls":  2,
+                       "additionalCalls":  4,
+                       "promptTokens":  47625,
+                       "completionTokens":  607,
+                       "plannerPromptTokens":  30244,
+                       "plannerCompletionTokens":  192,
+                       "elapsedMs":  15000,
+                       "retrievalElapsedMs":  6802,
+                       "reconcileElapsedMs":  8198,
+                       "fullReads":  1,
+                       "terminationReason":  "round-budget-exhausted"
+                   },
+    "poisonSummaryUsesOriginal":  true,
+    "exactDateAndOrderRead":  true,
+    "virtualIdRejected":  true,
+    "duplicateQueryRejected":  true,
+    "forbiddenQueryRejected":  true,
+    "fullReadBudgetRejected":  true,
+    "timeoutRejected":  true,
+    "staleHashRejected":  true,
+    "result":  "pass"
+}

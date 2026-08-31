@@ -33,6 +33,8 @@ const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
 const DEFAULT_DEEPSEEK_BASE = "https://api.deepseek.com";
 const MEMORY_EXPORT_SCHEMA = "olivia-soul.memory";
 const MEMORY_EXPORT_VERSION = 2;
+const LETTER_SUMMARY_PROMPT_VERSION = "v2-source-attribution";
+const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 const INJECTION_PATTERNS = [
@@ -158,6 +160,27 @@ function exchangeContentMd5(exchange) {
     .digest("hex");
 }
 
+function historySnapshotId(payload) {
+  const hash = createHash("sha256");
+  const append = value => {
+    const text = String(value ?? "");
+    hash.update(`${Buffer.byteLength(text, "utf8")}:`, "ascii");
+    hash.update(text, "utf8");
+  };
+  append(payload.schema);
+  append(payload.version);
+  append(payload.person);
+  append(payload.maxOrder);
+  append(payload.exchanges.length);
+  for (const exchange of payload.exchanges) {
+    for (const field of [
+      "letterId", "order", "date", "time", "contentMd5",
+      "exactSha256", "summary", "incoming", "reply",
+    ]) append(exchange[field]);
+  }
+  return hash.digest("hex");
+}
+
 function normalizeExchanges(exchanges) {
   if (!Array.isArray(exchanges)) throw httpError(400, "信件列表格式不正确");
   if (exchanges.length > 500) throw httpError(400, "一次最多保存 500 组往来");
@@ -179,6 +202,9 @@ function parseStandardMemoryJson(content) {
     const parsed = JSON.parse(content);
     if (parsed?.schema !== MEMORY_EXPORT_SCHEMA || ![1, MEMORY_EXPORT_VERSION].includes(parsed?.version)) return null;
     if (parsed.order !== "newest-first" || !Array.isArray(parsed.exchanges)) return null;
+    const summaryVersionsValid =
+      parsed.letterSummaryPromptVersion === LETTER_SUMMARY_PROMPT_VERSION &&
+      parsed.bulkSummaryPromptVersion === BULK_SUMMARY_PROMPT_VERSION;
     const normalized = normalizeExchanges(parsed.exchanges);
     const exchanges = normalized.map((exchange, index) => {
       const contentMd5 = exchangeContentMd5(exchange);
@@ -186,7 +212,7 @@ function parseStandardMemoryJson(content) {
       if (source.contentMd5 !== contentMd5) throw new Error("内容校验值不匹配");
       const letterId = String(source.letterId ?? "").trim();
       if (parsed.version === MEMORY_EXPORT_VERSION && !letterId) throw new Error("信件 ID 缺失");
-      const summary = String(source.summary ?? "").trim();
+      const summary = summaryVersionsValid ? String(source.summary ?? "").trim() : "";
       if (summary.length > 5000) throw new Error("逐封摘要过长");
       return { ...exchange, letterId: letterId || null, contentMd5, summary };
     });
@@ -198,7 +224,7 @@ function parseStandardMemoryJson(content) {
       : [];
     if (exportedHashes.length !== oldHashes.length || exportedHashes.some((hash, index) => hash !== oldHashes[index]))
       throw new Error("旧记忆合集校验值不匹配");
-    const oldMemorySummary = String(exportedOldMemory.summary ?? "").trim();
+    const oldMemorySummary = summaryVersionsValid ? String(exportedOldMemory.summary ?? "").trim() : "";
     if (oldMemorySummary.length > 5000) throw new Error("旧记忆合集过长");
     return {
       person: String(parsed.person ?? "").trim(),
@@ -274,12 +300,14 @@ function initDatabase(path) {
       letter_id TEXT PRIMARY KEY REFERENCES letters(id) ON DELETE CASCADE,
       content_md5 TEXT NOT NULL,
       summary TEXT NOT NULL,
+      prompt_version TEXT NOT NULL DEFAULT 'v2-source-attribution',
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS memory_bulk_summaries (
       user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       hashes_json TEXT NOT NULL,
       summary TEXT NOT NULL,
+      prompt_version TEXT NOT NULL DEFAULT 'v4-source-attribution',
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS archive_projections (
@@ -288,6 +316,25 @@ function initDatabase(path) {
       file_md5 TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS playlist_items (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      item_type INTEGER NOT NULL,
+      item_id TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      name_key TEXT NOT NULL DEFAULT '',
+      icon_url TEXT NOT NULL DEFAULT '',
+      song_id TEXT NOT NULL DEFAULT '',
+      performance_id TEXT NOT NULL DEFAULT '',
+      duration REAL NOT NULL DEFAULT 0,
+      video_duration REAL NOT NULL DEFAULT 0,
+      video_url TEXT NOT NULL DEFAULT '',
+      performance_type TEXT NOT NULL DEFAULT '',
+      video_by_tod_view TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, item_type, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS playlist_items_user_created ON playlist_items(user_id, created_at DESC);
   `);
   const letterColumns = db.prepare("PRAGMA table_info(letters)").all();
   if (!letterColumns.some(column => column.name === "source"))
@@ -308,7 +355,24 @@ function initDatabase(path) {
     db.exec("ALTER TABLE letters ADD COLUMN reply_label TEXT NOT NULL DEFAULT '回信'");
   if (!letterColumns.some(column => column.name === "content_md5"))
     db.exec("ALTER TABLE letters ADD COLUMN content_md5 TEXT");
+  const letterSummaryColumns = db.prepare("PRAGMA table_info(letter_summaries)").all();
+  if (!letterSummaryColumns.some(column => column.name === "prompt_version"))
+    db.exec("ALTER TABLE letter_summaries ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''");
+  const bulkSummaryColumns = db.prepare("PRAGMA table_info(memory_bulk_summaries)").all();
+  if (!bulkSummaryColumns.some(column => column.name === "prompt_version"))
+    db.exec("ALTER TABLE memory_bulk_summaries ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS letters_user_memory_order ON letters(user_id, memory_order) WHERE memory_order IS NOT NULL");
+  const playlistColumns = db.prepare("PRAGMA table_info(playlist_items)").all();
+  if (!playlistColumns.some(column => column.name === "duration"))
+    db.exec("ALTER TABLE playlist_items ADD COLUMN duration REAL NOT NULL DEFAULT 0");
+  if (!playlistColumns.some(column => column.name === "video_duration"))
+    db.exec("ALTER TABLE playlist_items ADD COLUMN video_duration REAL NOT NULL DEFAULT 0");
+  if (!playlistColumns.some(column => column.name === "video_url"))
+    db.exec("ALTER TABLE playlist_items ADD COLUMN video_url TEXT NOT NULL DEFAULT ''");
+  if (!playlistColumns.some(column => column.name === "performance_type"))
+    db.exec("ALTER TABLE playlist_items ADD COLUMN performance_type TEXT NOT NULL DEFAULT ''");
+  if (!playlistColumns.some(column => column.name === "video_by_tod_view"))
+    db.exec("ALTER TABLE playlist_items ADD COLUMN video_by_tod_view TEXT NOT NULL DEFAULT ''");
   db.prepare(`
     INSERT INTO settings(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO NOTHING
@@ -369,28 +433,35 @@ export function validateHarnessReply(stdout, reply) {
   return normalized;
 }
 
-async function deepSeekGenerator({ person, content, id, root, tempDir }) {
+async function deepSeekGenerator({ person, content, id, root, tempDir, historySnapshot }) {
   const harnessVersion = (await readFile(join(root, "harness", "VERSION"), "utf8")).trim();
   if (harnessVersion !== "v18") throw new Error(`Harness 版本不正确：${harnessVersion || "缺失"}`);
   const letterFile = join(tempDir, `${id}.letter.txt`);
   const replyFile = join(tempDir, `${id}.reply.txt`);
+  const historyFile = join(tempDir, `${id}.history.json`);
   await writeFile(letterFile, content, "utf8");
-  let progressBuffer = "";
-  const processResult = await runProcess("powershell.exe", [
-    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-    join(root, ".cursor", "skills", "fit-letters", "scripts", "harness-live.ps1"),
-    "-Person", person, "-Letter", letterFile, "-OutFile", replyFile,
-    "-RulesFile", join(root, "harness", "写法.md"), "-Root", root,
-  ], root, GENERATION_TIMEOUT_MS, undefined, chunk => {
-    progressBuffer += chunk;
-    const lines = progressBuffer.split(/\r?\n/u);
-    progressBuffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const stage = /^(STEP\d+\s+[\w-]+)/u.exec(line.trim())?.[1];
-      if (stage) console.log(`[harness-stage] id=${id} stage=${stage}`);
-    }
-  });
-  return validateHarnessReply(processResult.stdout, await readFile(replyFile, "utf8"));
+  await writeFile(historyFile, JSON.stringify(historySnapshot), "utf8");
+  try {
+    let progressBuffer = "";
+    const processResult = await runProcess("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+      join(root, ".cursor", "skills", "fit-letters", "scripts", "harness-live.ps1"),
+      "-Person", person, "-Letter", letterFile, "-OutFile", replyFile,
+      "-HistoryFile", historyFile,
+      "-RulesFile", join(root, "harness", "写法.md"), "-Root", root,
+    ], root, GENERATION_TIMEOUT_MS, undefined, chunk => {
+      progressBuffer += chunk;
+      const lines = progressBuffer.split(/\r?\n/u);
+      progressBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const stage = /^(STEP\d+\s+[\w-]+)/u.exec(line.trim())?.[1];
+        if (stage) console.log(`[harness-stage] id=${id} stage=${stage}`);
+      }
+    });
+    return validateHarnessReply(processResult.stdout, await readFile(replyFile, "utf8"));
+  } finally {
+    await rm(historyFile, { force: true });
+  }
 }
 
 async function readDeepSeekConfig(root) {
@@ -471,6 +542,7 @@ export async function createOliviaService(options = {}) {
   });
   const runMemoryRefresh = options.runMemoryRefresh ?? true;
   const memoryRetryIntervalMs = options.memoryRetryIntervalMs ?? 60 * 1000;
+  const strictMemorySummaryContract = !options.memoryRefresher;
   const memoryRefresher = options.memoryRefresher ?? ((inputFile, outputFile, onSpawn, onProgress) => {
     let progressBuffer = "";
     return runProcess("powershell.exe", [
@@ -737,6 +809,43 @@ export async function createOliviaService(options = {}) {
     `).all(userId);
   }
 
+  function memoryBulk(userId) {
+    return db.prepare(
+      "SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?",
+    ).get(userId) ?? null;
+  }
+
+  function buildHistorySnapshot(userId, person) {
+    const exchanges = memoryRows(userId).map(row => {
+      const incoming = row.content ?? "";
+      const reply = row.reply_text ?? "";
+      return {
+        letterId: row.id,
+        order: row.memory_order,
+        date: row.letter_date,
+        time: row.letter_time,
+        contentMd5: row.content_md5,
+        exactSha256: createHash("sha256")
+          .update(`${incoming.trim()}\n---\n${reply.trim()}`, "utf8")
+          .digest("hex"),
+        summary: row.summary ?? "",
+        incoming,
+        reply,
+      };
+    });
+    const payload = {
+      schema: "olivia-history.snapshot",
+      version: 1,
+      person,
+      maxOrder: exchanges.at(-1)?.order ?? 0,
+      exchanges,
+    };
+    return {
+      ...payload,
+      snapshotId: historySnapshotId(payload),
+    };
+  }
+
   function memoryExchange(row, req) {
     return {
       letterId: row.id,
@@ -764,7 +873,7 @@ export async function createOliviaService(options = {}) {
       summary: row.summary ?? "",
       video: row.reply_video ?? "",
     }));
-    const bulk = db.prepare("SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?").get(userId) ?? null;
+    const bulk = memoryBulk(userId);
     return createHash("md5").update(JSON.stringify({ rows, bulk }), "utf8").digest("hex");
   }
 
@@ -772,7 +881,7 @@ export async function createOliviaService(options = {}) {
     const lines = ["### 最近十封逐封总结", ""];
     const oldCount = Math.max(0, rows.length - 10);
     const oldHashes = rows.slice(0, oldCount).map(row => row.content_md5);
-    const bulk = db.prepare("SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?").get(userId);
+    const bulk = memoryBulk(userId);
     if (oldCount && bulk && JSON.stringify(oldHashes) === bulk.hashes_json) {
       lines.unshift("### 十封以前的大总结（最多500字）", "", bulk.summary, "");
     }
@@ -855,10 +964,12 @@ export async function createOliviaService(options = {}) {
     const oldestFirst = memoryRows(user.id);
     if (!oldestFirst.length) throw httpError(409, "暂无记忆");
     const oldHashes = oldestFirst.slice(0, Math.max(0, oldestFirst.length - 10)).map(row => row.content_md5);
-    const bulk = db.prepare("SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?").get(user.id);
+    const bulk = memoryBulk(user.id);
     return {
       schema: MEMORY_EXPORT_SCHEMA,
       version: MEMORY_EXPORT_VERSION,
+      letterSummaryPromptVersion: LETTER_SUMMARY_PROMPT_VERSION,
+      bulkSummaryPromptVersion: BULK_SUMMARY_PROMPT_VERSION,
       exportedAt: new Date().toISOString(),
       person: assertPerson(user.person),
       order: "newest-first",
@@ -1038,8 +1149,8 @@ export async function createOliviaService(options = {}) {
           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'import', ?, ?, ?, ?, ?)
         `);
         const insertSummary = db.prepare(`
-          INSERT INTO letter_summaries(letter_id, content_md5, summary, updated_at)
-          VALUES(?, ?, ?, ?)
+          INSERT INTO letter_summaries(letter_id, content_md5, summary, prompt_version, updated_at)
+          VALUES(?, ?, ?, ?, ?)
         `);
         imported.forEach((exchange, index) => {
           const timestamp = exchangeTimestamp(exchange, nowSeconds() - imported.length + index);
@@ -1050,13 +1161,25 @@ export async function createOliviaService(options = {}) {
             exchange.date, exchange.time, exchange.replyLabel, exchange.contentMd5,
           );
           if (exchange.summary)
-            insertSummary.run(exchange.letterId, exchange.contentMd5, exchange.summary, nowSeconds());
+            insertSummary.run(
+              exchange.letterId,
+              exchange.contentMd5,
+              exchange.summary,
+              LETTER_SUMMARY_PROMPT_VERSION,
+              nowSeconds(),
+            );
         });
         if (payload.oldMemory.summary && payload.oldMemory.contentMd5s.length)
           db.prepare(`
-            INSERT INTO memory_bulk_summaries(user_id, hashes_json, summary, updated_at)
-            VALUES(?, ?, ?, ?)
-          `).run(user.id, JSON.stringify(payload.oldMemory.contentMd5s), payload.oldMemory.summary, nowSeconds());
+            INSERT INTO memory_bulk_summaries(user_id, hashes_json, summary, prompt_version, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+          `).run(
+            user.id,
+            JSON.stringify(payload.oldMemory.contentMd5s),
+            payload.oldMemory.summary,
+            BULK_SUMMARY_PROMPT_VERSION,
+            nowSeconds(),
+          );
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
@@ -1121,9 +1244,7 @@ export async function createOliviaService(options = {}) {
     if (rows.some(row => !row.summary)) return true;
     const oldHashes = rows.slice(0, Math.max(0, rows.length - 10)).map(row => row.content_md5);
     if (!oldHashes.length) return false;
-    const bulk = db.prepare(
-      "SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?",
-    ).get(userId);
+    const bulk = memoryBulk(userId);
     return !bulk || !bulk.summary || bulk.hashes_json !== JSON.stringify(oldHashes);
   }
 
@@ -1226,8 +1347,11 @@ export async function createOliviaService(options = {}) {
     const inputFile = join(tempDir, `${randomUUID()}.memory-input.json`);
     const outputFile = join(tempDir, `${randomUUID()}.memory-output.json`);
     const oldHashes = rows.slice(0, Math.max(0, rows.length - 10)).map(row => row.content_md5);
-    const bulk = db.prepare("SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?").get(localUser.id);
+    const bulk = memoryBulk(localUser.id);
     const task = {
+      schema: "olivia-memory.summary-task",
+      letterSummaryPromptVersion: LETTER_SUMMARY_PROMPT_VERSION,
+      bulkSummaryPromptVersion: BULK_SUMMARY_PROMPT_VERSION,
       person: safePerson,
       exchanges: rows.map(row => ({
         letterId: row.id,
@@ -1261,6 +1385,11 @@ export async function createOliviaService(options = {}) {
         if (job.cancelled) return;
         const result = JSON.parse(await readFile(outputFile, "utf8"));
         if (job.cancelled) return;
+        if (strictMemorySummaryContract && (
+          result.schema !== "olivia-memory.summary-result" ||
+          result.letterSummaryPromptVersion !== LETTER_SUMMARY_PROMPT_VERSION ||
+          result.bulkSummaryPromptVersion !== BULK_SUMMARY_PROMPT_VERSION
+        )) throw new Error("摘要 Prompt 版本不匹配");
         if (!Array.isArray(result.summaries)) throw new Error("摘要输出缺少逐封摘要");
         const expected = new Map(rows.map(row => [row.id, row]));
         const seenSummaryIds = new Set();
@@ -1284,24 +1413,38 @@ export async function createOliviaService(options = {}) {
         db.exec("BEGIN IMMEDIATE");
         try {
           const upsert = db.prepare(`
-            INSERT INTO letter_summaries(letter_id, content_md5, summary, updated_at)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO letter_summaries(letter_id, content_md5, summary, prompt_version, updated_at)
+            VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(letter_id) DO UPDATE SET
               content_md5 = excluded.content_md5,
               summary = excluded.summary,
+              prompt_version = excluded.prompt_version,
               updated_at = excluded.updated_at
           `);
           for (const item of summaries)
-            upsert.run(item.row.id, item.row.content_md5, item.summary, nowSeconds());
+            upsert.run(
+              item.row.id,
+              item.row.content_md5,
+              item.summary,
+              LETTER_SUMMARY_PROMPT_VERSION,
+              nowSeconds(),
+            );
           if (oldHashes.length)
             db.prepare(`
-              INSERT INTO memory_bulk_summaries(user_id, hashes_json, summary, updated_at)
-              VALUES(?, ?, ?, ?)
+              INSERT INTO memory_bulk_summaries(user_id, hashes_json, summary, prompt_version, updated_at)
+              VALUES(?, ?, ?, ?, ?)
               ON CONFLICT(user_id) DO UPDATE SET
                 hashes_json = excluded.hashes_json,
                 summary = excluded.summary,
+                prompt_version = excluded.prompt_version,
                 updated_at = excluded.updated_at
-            `).run(localUser.id, JSON.stringify(oldHashes), bulkSummary, nowSeconds());
+            `).run(
+              localUser.id,
+              JSON.stringify(oldHashes),
+              bulkSummary,
+              BULK_SUMMARY_PROMPT_VERSION,
+              nowSeconds(),
+            );
           else db.prepare("DELETE FROM memory_bulk_summaries WHERE user_id = ?").run(localUser.id);
           db.exec("COMMIT");
         } catch (error) {
@@ -1491,7 +1634,15 @@ export async function createOliviaService(options = {}) {
     console.log(`[reply-worker] generating id=${row.id}`);
     try {
       await ensureArchiveProjection(localUser);
-      const reply = await generator({ person: row.person, content: row.content, id: row.id, root, tempDir });
+      const historySnapshot = buildHistorySnapshot(localUser.id, row.person);
+      const reply = await generator({
+        person: row.person,
+        content: row.content,
+        id: row.id,
+        root,
+        tempDir,
+        historySnapshot,
+      });
       if (!reply.trim()) throw new Error("生成器返回空回信");
       const repliedAt = nowSeconds();
       db.prepare(`
@@ -1588,6 +1739,8 @@ export async function createOliviaService(options = {}) {
     const path = url.pathname;
     if (path.startsWith("/toy/letter/"))
       console.log(`[letter-request] ${req.method} ${req.url}`);
+    if (path === "/toy/addToPlaylist" || path === "/toy/delFromPlaylist" || path === "/toy/searchPlaylist")
+      console.log(`[playlist-request] ${req.method} ${req.url}`);
     if (req.method === "OPTIONS") {
       res.writeHead(204, corsHeaders(req));
       return res.end();
@@ -1696,6 +1849,154 @@ export async function createOliviaService(options = {}) {
       const shareId = row.share_id ?? randomUUID();
       if (!row.share_id) db.prepare("UPDATE letters SET share_id = ? WHERE id = ?").run(shareId, row.id);
       return ok(req, res, { shareId });
+    }
+
+    function playlistDuration(value) {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function playlistTodViewBroken(value) {
+      return typeof value === "string" && value.includes("[object Object]");
+    }
+
+    function playlistTodViewStore(value) {
+      if (value === undefined || value === null || value === "") return "";
+      if (playlistTodViewBroken(value)) return "";
+      if (typeof value === "string") return value;
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return "";
+      }
+    }
+
+    function playlistTodViewRead(raw) {
+      if (!raw) return undefined;
+      if (raw === "true") return true;
+      if (raw === "false") return false;
+      if (playlistTodViewBroken(raw)) return undefined;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return raw;
+      }
+    }
+
+    function playlistMedia(body = {}) {
+      const videoByTodView = body.videoByTodView ?? body.video_by_tod_view;
+      return {
+        video_url: String(body.videoUrl ?? body.video_url ?? body.mediaUrl ?? body.media_url ?? ""),
+        performance_type: String(body.performanceType ?? body.performance_type ?? ""),
+        video_by_tod_view: playlistTodViewStore(videoByTodView),
+      };
+    }
+
+    function playlistItemPayload(row) {
+      const duration = playlistDuration(row.duration);
+      const videoDuration = playlistDuration(row.video_duration) || duration;
+      const videoByTodView = playlistTodViewRead(row.video_by_tod_view);
+      return {
+        itemType: row.item_type,
+        itemId: row.item_id,
+        id: row.item_id,
+        name: row.name || row.item_id,
+        nameKey: row.name_key || "",
+        iconUrl: row.icon_url || "",
+        coverUrl: row.icon_url || "",
+        songId: row.song_id || (row.item_type === 2 ? row.item_id : ""),
+        performanceId: row.performance_id || (row.item_type === 1 ? row.item_id : ""),
+        duration,
+        videoDuration,
+        videoUrl: row.video_url || "",
+        performanceType: row.performance_type || "",
+        videoByTodView,
+      };
+    }
+
+    if (req.method === "GET" && path === "/toy/searchPlaylist") {
+      const user = getLocalUser();
+      const pageSize = Math.min(200, Math.max(1, Number(url.searchParams.get("pageSize") ?? url.searchParams.get("page_size") ?? 200)));
+      const cursor = Math.max(0, Number(url.searchParams.get("cursor") ?? 0));
+      const rows = db.prepare("SELECT * FROM playlist_items WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?").all(user.id, pageSize + 1, cursor);
+      const hasMore = rows.length > pageSize;
+      const list = rows.slice(0, pageSize).map(playlistItemPayload);
+      const total = Number(db.prepare("SELECT COUNT(*) count FROM playlist_items WHERE user_id = ?").get(user.id).count);
+      return ok(req, res, { list, hasMore, nextCursor: hasMore ? cursor + pageSize : 0, total });
+    }
+
+    if (req.method === "POST" && path === "/toy/addToPlaylist") {
+      const user = getLocalUser();
+      const body = await readJson(req);
+      const playlistTypes = { PERFORMANCE: 1, PGC_SONG: 2, UGC_SONG: 3 };
+      const rawType = body.itemType ?? body.item_type;
+      const itemType = Number.isInteger(Number(rawType)) ? Number(rawType) : playlistTypes[String(rawType ?? "").toUpperCase()] ?? NaN;
+      const itemId = String(body.itemId ?? body.item_id ?? body.id ?? body.songId ?? body.song_id ?? body.performanceId ?? body.performance_id ?? "").trim();
+      if (!Number.isInteger(itemType) || !itemId) throw httpError(400, "播单条目不完整");
+      const existing = db.prepare("SELECT * FROM playlist_items WHERE user_id = ? AND item_type = ? AND item_id = ?").get(user.id, itemType, itemId);
+      const media = playlistMedia(body);
+      if (existing) {
+        const duration = playlistDuration(body.duration ?? body.audioDuration ?? body.audio_duration);
+        const videoDuration = playlistDuration(body.videoDuration ?? body.video_duration) || duration;
+        const needDuration = playlistDuration(existing.duration) === 0 && (duration || videoDuration);
+        const needVideo = !existing.video_url && media.video_url;
+        const needTod = media.video_by_tod_view && (!existing.video_by_tod_view || playlistTodViewBroken(existing.video_by_tod_view));
+        if (needDuration || needVideo || needTod) {
+          const next = {
+            ...existing,
+            duration: needDuration ? duration : existing.duration,
+            video_duration: needDuration ? videoDuration : existing.video_duration,
+            video_url: needVideo ? media.video_url : existing.video_url,
+            performance_type: existing.performance_type || media.performance_type,
+            video_by_tod_view: needTod ? media.video_by_tod_view : existing.video_by_tod_view,
+          };
+          db.prepare("UPDATE playlist_items SET duration = ?, video_duration = ?, video_url = ?, performance_type = ?, video_by_tod_view = ? WHERE id = ?").run(
+            next.duration, next.video_duration, next.video_url, next.performance_type, next.video_by_tod_view, existing.id,
+          );
+          return ok(req, res, playlistItemPayload(next));
+        }
+        return ok(req, res, playlistItemPayload(existing));
+      }
+      const duration = playlistDuration(body.duration ?? body.audioDuration ?? body.audio_duration);
+      const videoDuration = playlistDuration(body.videoDuration ?? body.video_duration) || duration;
+      const row = {
+        id: randomUUID(),
+        user_id: user.id,
+        item_type: itemType,
+        item_id: itemId,
+        name: String(body.name ?? body.performanceName ?? body.songName ?? itemId),
+        name_key: String(body.nameKey ?? body.name_key ?? body.songNameKey ?? ""),
+        icon_url: String(body.iconUrl ?? body.icon_url ?? body.coverUrl ?? body.cover_url ?? ""),
+        song_id: String(body.songId ?? body.song_id ?? (itemType === 2 ? itemId : "")),
+        performance_id: String(body.performanceId ?? body.performance_id ?? (itemType === 1 ? itemId : "")),
+        duration,
+        video_duration: videoDuration,
+        video_url: media.video_url,
+        performance_type: media.performance_type,
+        video_by_tod_view: media.video_by_tod_view,
+        created_at: nowSeconds(),
+      };
+      try {
+        db.prepare(`
+          INSERT INTO playlist_items(id, user_id, item_type, item_id, name, name_key, icon_url, song_id, performance_id, duration, video_duration, video_url, performance_type, video_by_tod_view, created_at)
+          VALUES(@id, @user_id, @item_type, @item_id, @name, @name_key, @icon_url, @song_id, @performance_id, @duration, @video_duration, @video_url, @performance_type, @video_by_tod_view, @created_at)
+        `).run(row);
+      } catch (error) {
+        const duplicate = db.prepare("SELECT * FROM playlist_items WHERE user_id = ? AND item_type = ? AND item_id = ?").get(user.id, itemType, itemId);
+        if (duplicate) return ok(req, res, playlistItemPayload(duplicate));
+        throw error;
+      }
+      return ok(req, res, playlistItemPayload(row));
+    }
+
+    if (req.method === "POST" && path === "/toy/delFromPlaylist") {
+      const user = getLocalUser();
+      const body = await readJson(req);
+      const itemType = Number(body.itemType ?? body.item_type);
+      const itemId = String(body.itemId ?? body.item_id ?? "").trim();
+      if (!Number.isInteger(itemType) || !itemId) throw httpError(400, "播单条目不完整");
+      db.prepare("DELETE FROM playlist_items WHERE user_id = ? AND item_type = ? AND item_id = ?").run(user.id, itemType, itemId);
+      return ok(req, res, { itemType, itemId });
     }
 
     const videoManageMatch = /^\/admin\/api\/letters\/([^/]+)\/video$/u.exec(path);
@@ -1812,7 +2113,7 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "GET" && path === "/admin/api/debug") {
       const user = getLocalUser();
-      const bulk = db.prepare("SELECT summary FROM memory_bulk_summaries WHERE user_id = ?").get(user.id);
+      const bulk = memoryBulk(user.id);
       return ok(req, res, {
         delaySeconds: Number(getSetting(REPLY_DELAY_SETTING)),
         defaultDelaySeconds: REPLY_DELAY_SECONDS,
@@ -2017,6 +2318,8 @@ export async function createOliviaService(options = {}) {
         const standard = body.source === "json" ? parseStandardMemoryJson(JSON.stringify({
           schema: MEMORY_EXPORT_SCHEMA,
           version: MEMORY_EXPORT_VERSION,
+          letterSummaryPromptVersion: body.letterSummaryPromptVersion,
+          bulkSummaryPromptVersion: body.bulkSummaryPromptVersion,
           person: body.person,
           order: body.order,
           oldMemory: body.oldMemory,
@@ -2042,18 +2345,25 @@ export async function createOliviaService(options = {}) {
         if (payload.source === "json") {
           const rowsByHash = new Map(memoryRows(user.id).map(row => [row.content_md5, row]));
           const upsert = db.prepare(`
-            INSERT INTO letter_summaries(letter_id, content_md5, summary, updated_at)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO letter_summaries(letter_id, content_md5, summary, prompt_version, updated_at)
+            VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(letter_id) DO UPDATE SET
               content_md5 = excluded.content_md5,
               summary = excluded.summary,
+              prompt_version = excluded.prompt_version,
               updated_at = excluded.updated_at
           `);
           for (const exchange of payload.exchanges) {
             if (!exchange.summary) continue;
             const row = rowsByHash.get(exchange.contentMd5);
             if (!row) continue;
-            upsert.run(row.id, row.content_md5, exchange.summary, nowSeconds());
+            upsert.run(
+              row.id,
+              row.content_md5,
+              exchange.summary,
+              LETTER_SUMMARY_PROMPT_VERSION,
+              nowSeconds(),
+            );
             restoredSummaries++;
           }
         }
@@ -2140,6 +2450,8 @@ export async function createOliviaService(options = {}) {
       const responseStatus = req.url.startsWith("/toy/") ? 200 : status;
       if (req.url.startsWith("/toy/letter/"))
         console.error(`[letter-error] ${req.method} ${req.url} code=${error.code ?? -1} message=${error.message}`);
+      if (req.url.includes("/toy/addToPlaylist") || req.url.includes("/toy/delFromPlaylist") || req.url.includes("/toy/searchPlaylist"))
+        console.error(`[playlist-error] ${req.method} ${req.url} code=${error.code ?? -1} message=${error.message}`);
       sendJson(req, res, { code: error.code ?? -1, message: error.message, data: null }, responseStatus);
     });
   });

@@ -37,8 +37,8 @@ SQLite 是信件与记忆的唯一事实源。正式 Markdown 不是数据库，
 核心数据：
 
 - `letters`：来信、回信、日期、顺序、视频、`content_md5`。
-- `letter_summaries`：逐封摘要，绑定 `letter_id + content_md5`。
-- `memory_bulk_summaries`：旧信合集，绑定有序 MD5 数组。
+- `letter_summaries`：逐封摘要，绑定 `letter_id + content_md5 + prompt_version`。
+- `memory_bulk_summaries`：旧信合集，绑定有序 MD5 数组与 `prompt_version`。
 - `archive_projections`：SQL 源 MD5 与 Markdown 文件 MD5。
 
 正式投影：
@@ -55,7 +55,9 @@ SQLite 是信件与记忆的唯一事实源。正式 Markdown 不是数据库，
 
 任一失败即重建；不得解析旧 Markdown 后回写 SQL。
 
-## 3. MD5 契约
+每次正式生成前，Node 从 SQL 冻结一份 `olivia-history.snapshot/v1` 临时 JSON。快照含全部历史原文、稳定 `letterId`、顺序、日期、`contentMd5`、逐封 SHA-256 和整体 `snapshotId`；随后通过 `-HistoryFile` 交给 Harness。本轮开始后，即使记忆被编辑，本轮证据也不改变。独立回归没有 SQLite 时，由 `history-retrieval.ps1` 从归档生成同一契约。
+
+## 3. 哈希契约
 
 逐封正文 MD5 算法：
 
@@ -70,6 +72,8 @@ md5(utf8(incoming.trim() + "\n---\n" + reply.trim()))
 - 旧信合集的有序哈希数组必须与当前旧区逐位一致。
 - `.soul` 中的摘要、视频与正文通过 `letterId + contentMd5` 校验。
 - SQL 源内容和 Markdown 投影分别保存 MD5，防止投影被手工改脏。
+- 按需检索返回的完整原文同时携带 `letterId + contentMd5 + exactSha256`；审计包记录本轮整体 `snapshotId`。
+- 摘要 Prompt 版本变化时，即使正文 MD5 未变，旧摘要也不可见并自动重算。
 
 `_probe/mem_cache` 只供拟合测试兼容使用，不是本机服务正式记忆源。
 
@@ -98,27 +102,27 @@ resources/workspace-template/林离人设.md
 
 桌面端每次启动会把模板人设覆盖到用户工作区，保证已安装服务与仓库正式人设一致。
 
-## 5. 四步 Harness
+## 5. 可审计 Harness
 
-文件编号保留历史编号，实际职责为四步：
+文件编号保留历史编号，实际职责为：
 
 ```text
 STEP0 组装记忆
-STEP1 预检与情感账本
+STEP1 生成暂定情感账本
+STEP2 按需检索历史原文并校正账本
 STEP3 生成草稿
 STEP4 检查草稿
-STEP5 有违规时重写；无违规时草稿直出
+STEP5 有违规时重写并再次检查；无违规时草稿直出
 ```
 
 ### STEP0：分层记忆
 
-`memory-lib.ps1` 组装：
+`memory-lib.ps1` 同时组装两份上下文：
 
-1. 固定开信。
-2. 十封以前五段式回忆。
-3. 再前 5 封逐封摘要。
-4. 最近 5 封原文。
-5. 本次来信。
+1. 导航上下文：固定开信、十封以前五段式回忆、再前 5 封逐封摘要、最近 5 封原文、本次来信。只交给 STEP1 和 STEP2 找线索。
+2. 事实上下文：固定开信、最近 5 封原文、本次来信。交给校正、草稿、检查和重写。
+
+摘要不是关系、称呼、亲密动作或共同事实的证据。更早事实必须由 STEP2 读取完整原文。
 
 未知日期档案也必须从第一条 `### 往来 NN` 开始解析，不能从第一条正式日期开始截断。
 
@@ -151,6 +155,7 @@ Prompt：`harness/01-预检.md`。
 - 关系
 - 关系依据
 - 已承认情感
+- 已承认称呼
 - 既有亲密
 - 既有边界
 - 亲密上限
@@ -160,7 +165,7 @@ Prompt：`harness/01-预检.md`。
 - 本封亲密请求
 - 本封亲密判定
 
-### 十三行输出契约
+### 十四行输出契约
 
 ```text
 性描写　无／有　短证据
@@ -170,6 +175,7 @@ Prompt：`harness/01-预检.md`。
 关系　厌恶／令你感兴趣的笔友／一般朋友／好朋友／密友／暧昧／男女朋友
 关系依据　一句
 已承认情感　内容／无
+已承认称呼　内容／无
 既有亲密　内容／无
 既有边界　内容／无
 亲密上限　无／牵手轻抱／拥抱轻吻
@@ -180,7 +186,21 @@ Prompt：`harness/01-预检.md`。
 
 格式不合格时自动追加一次严格格式修复调用；第二次仍不合格则整封失败。
 
-当前关系语义中，“我也爱你”写入已承认情感，但没有明确确认男朋友、恋人或双方恋爱关系时仍归入“暧昧”。身体许可继续由既有边界和亲密判定控制。
+“已承认称呼”与关系、亲密、婚姻和同居分开保存。林离叫过对方“老公”只证明称呼成立，不自动证明婚礼、同居或法律关系。
+
+### STEP2：按需翻信
+
+Prompt：`harness/02-历史检索.md` 与 `harness/02-账本校正.md`。控制层只提供 `search`、`read`、`neighbors`，不接受 SQL、路径、URL、正则或任意命令。
+
+硬预算：
+
+- 每轮最多 2 个查询，全程最多 2 轮。
+- 搜索最多返回 5 个候选片段。
+- 最多读取 3 封完整往来。
+- 返回内容累计不超过 12,000 字符，检索不超过 45 秒。
+- 格式错误、重复或越权请求只允许修复一次，随后冻结检索。
+
+模型以严格 JSON 输出 `finish` 或 `lookup`。候选片段只负责定位；旧事进入最终账本和正文前必须 `read` 或 `neighbors` 取得完整原文。原文到达后，账本校正器可覆盖 STEP1 暂定结果；暂定账本仍保留为审计产物。
 
 ### STEP3：草稿
 
@@ -189,10 +209,11 @@ Prompt：`harness/03-中段生成.md`。
 输入：
 
 - `00-栏目.md`
-- 十三行情感账本
+- 十四行最终情感账本
+- 近期事实上下文
+- 带 ID 与哈希的按需检索原文
 - `写法.md`
 - `林离人设.md`
-- 分层往来上下文
 
 输出只能是纯文本回信正文。
 
@@ -205,6 +226,8 @@ Prompt：`harness/04-尾端检查.md`。
 - 温度、情感、亲密和边界是否回撤或越级。
 - 未请求时是否主动给身体接触。
 - 是否认领伪造事实或补造当天事件。
+- 是否否认已承认称呼，或把称呼扩成婚姻、婚礼、同居和法律关系。
+- 引用的旧事是否有近期原文或按需检索原文支持。
 - 点名问题与明确脆弱是否遗漏。
 - 是否泄漏内部规则。
 
@@ -212,7 +235,7 @@ Prompt：`harness/04-尾端检查.md`。
 
 Prompt：`harness/05-反馈重写.md`。
 
-只修改违规处及被其影响的句子。没有违规时不调用模型，直接把草稿保存为最终稿。
+只修改违规处及被其影响的句子。没有违规时不调用模型，直接把草稿保存为最终稿。发生重写时必须再次运行 STEP4；第二次仍有违规则整封明确失败，不得带病寄出。
 
 ## 6. 实时接入
 
@@ -250,8 +273,13 @@ AllowStateBootstrap = true
 
 ```text
 h4_{person}_{NN}_{tag}_1safe.txt
+h4_{person}_{NN}_{tag}_1safe_provisional.txt
+h4_{person}_{NN}_{tag}_2history_1_intent.txt
+h4_{person}_{NN}_{tag}_2history_1_result.txt
+h4_{person}_{NN}_{tag}_2history_audit.txt
 h4_{person}_{NN}_{tag}_3draft.txt
 h4_{person}_{NN}_{tag}_4check.txt
+h4_{person}_{NN}_{tag}_5recheck.txt
 h4_{person}_{NN}_{tag}_5final.txt
 ```
 
@@ -274,6 +302,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".cursor\skills\fit-lett
 - 返回 `contentMd5` 与 SQL 当前值一致。
 - 摘要数量完整。
 - 旧信合集哈希链逐位一致。
+- 返回的逐封与合集 Prompt 版本等于当前版本。
+
+逐封摘要必须区分“他声称/他称呼”和“她明确承认/她给过”。称呼不得推导成婚姻、同居或法律关系。当前版本分别为 `v2-source-attribution` 与 `v4-source-attribution`。
 
 校验通过后事务写入 SQL，再全量重建 Markdown 投影。
 
@@ -298,6 +329,8 @@ harness/VERSION
 harness/00-栏目.md
 harness/01-预检.md
 harness/01-初始化账本.md
+harness/02-历史检索.md
+harness/02-账本校正.md
 harness/03-中段生成.md
 harness/04-尾端检查.md
 harness/05-反馈重写.md
@@ -306,6 +339,7 @@ harness/写法.md
 林离人设.md
 .cursor/skills/fit-letters/scripts/harness-live.ps1
 .cursor/skills/fit-letters/scripts/harness-4step.ps1
+.cursor/skills/fit-letters/scripts/history-retrieval.ps1
 .cursor/skills/fit-letters/scripts/memory-lib.ps1
 .cursor/skills/fit-letters/scripts/refresh-live-memory.ps1
 .cursor/skills/fit-letters/scripts/ds-call.ps1
@@ -331,14 +365,17 @@ npm test
 - 无记忆导出不生成空 `.soul`。
 - `.soul` 二级确认任一取消均不调用接口。
 - SQL 编辑、删除、重排后 Markdown 投影可被自动纠正。
-- 正文修改后旧摘要因 MD5 不匹配而失效。
+- 正文修改后旧摘要因 MD5 不匹配而失效；Prompt 版本变化后旧摘要也会失效。
+- 精确 ID、顺序和日期读取命中率为 100%，历史引用 Recall@5 不低于 95%。
+- 摘要与原文冲突时采用原文；越权读取和预算突破为 0。
 - 同一 person 连续两封严格串行。
 - 一次性记忆初始化可正确读取未知日期档案。
 - 安装包与便携包都包含 SHA-256 正确的 Whisper small 模型。
 - 中文安装目录首次转写会桥接到 ASCII 路径，且不发起模型下载。
 
-v18 一次性初始化回归已覆盖 20 人。修复未知日期截断后，20/20 生成有效十三行账本；结果见：
+v18 一次性初始化回归已覆盖 20 人。修复未知日期截断后，20/20 生成有效账本；按需翻信另用 97 封真实档案固定回归。结果见：
 
 ```text
 _probe/v18_import_once_fixed3_relations.tsv
+_probe/history97-regression-report.json
 ```
