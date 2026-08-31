@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import test from "node:test";
@@ -123,6 +123,7 @@ test("complete candidate exits 0, writes sanitized evidence, and leaves every sc
     ]);
     assert.equal(lines.length, 1);
     assert.deepEqual(Object.keys(summary).sort(), ["counts", "reportJson", "status"]);
+    assert.equal(summary.reportJson, "evidence/stage1a-report.json");
     assert.equal(summary.status, "candidate_ready");
     assert.deepEqual(Object.keys(summary.counts).sort(), ["candidates", "completeValidations", "protocolFiles"]);
     assert.doesNotMatch(`${result.stdout}\n${evidenceText}\n${JSON.stringify(report)}`, /never-report-this|authorization|Bearer |sycan|olivia-renderer-cli-/ui);
@@ -236,15 +237,15 @@ test("requiredDrive is test-support only and public runCli cannot be weakened", 
 test("a CLI bundle-write failure leaves no current-run formal evidence or reports", async () => {
   const fixture = await createFixture({ candidate: "none" });
   const evidenceDir = join(fixture.dataRoot, "evidence");
-  let installRenames = 0;
+  let installLinks = 0;
   try {
     const result = await captureRun(fixture.args, {
       requiredDrive: fixture.requiredDrive,
       dependencies: {
         writeEvidenceBundle: (layout, bundle) => writeStage1ABundleForTest(layout, bundle, {
-          rename: async (source, target) => {
-            if (/\.stage$/u.test(source) && ++installRenames === 3) throw new Error("injected third install failure");
-            return rename(source, target);
+          link: async (source, target) => {
+            if (/\.stage$/u.test(source) && ++installLinks === 3) throw new Error("injected third install failure");
+            return link(source, target);
           },
         }),
       },

@@ -14,7 +14,7 @@ const FLAGS = Object.freeze(["--data-root", "--game-root", "--backup-root", "--a
 const FLAG_SET = new Set(FLAGS);
 const APP_MANIFEST = "appmanifest_4532590.acf";
 const MARKER = "ovilia_Win64_Development_15918";
-const PRODUCTION_DATA_ROOT = win32.resolve("I:\\OliviaSoulData\\MidiRenderer");
+const PUBLIC_REPORT_PATH = "evidence/stage1a-report.json";
 
 export function createProductionCliDependencies() {
   return Object.freeze({
@@ -119,7 +119,7 @@ export async function runCliCore(args, dependencies) {
       completeValidations: validations.filter(validation => validation.status === "complete").length,
       protocolFiles: report.protocolEvidence.files.length,
     },
-    reportJson: publicReportPath(layout),
+    reportJson: PUBLIC_REPORT_PATH,
     status: report.status,
   };
   dependencies.stdout.write(`${JSON.stringify(summary)}\n`);
@@ -167,10 +167,4 @@ function parseArgs(args) {
 function sourceCandidateIdForPath(path) {
   const normalized = win32.resolve(path).replaceAll("/", "\\").toLowerCase();
   return createHash("sha256").update(normalized, "utf8").digest("hex");
-}
-
-function publicReportPath(layout) {
-  return layout.root.toLowerCase() === PRODUCTION_DATA_ROOT.toLowerCase()
-    ? layout.reportJson
-    : "<data-root>\\evidence\\stage1a-report.json";
 }

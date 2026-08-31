@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, mkdir, open, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test from "node:test";
@@ -234,6 +234,58 @@ test("removes embedded Windows, UNC, Unix, user, and credential-bearing paths fr
   }
 });
 
+test("discovers path principals before removing them from report keys, values, and binary evidence", async () => {
+  const layout = await createLayout();
+  const username = "sycan";
+  const unixUsername = "linux-user";
+  const uncUsername = "unc-user";
+  const sensitiveKey = "Z:\\Secret\\token";
+  const report = buildStage1AReport(blockedInput({
+    inventory: {
+      ...blockedInput().inventory,
+      roots: [
+        `C:\\Users\\${username}\\game`,
+        `/home/${unixUsername}/game`,
+        `\\\\server\\Users\\${uncUsername}\\game`,
+      ],
+      steam: {
+        ...steam,
+        metadata: {
+          [username]: "standalone-key",
+          [sensitiveKey]: "sensitive-path-key",
+          owner: username,
+          unixOwner: unixUsername,
+          uncOwner: uncUsername,
+          token: "token-field-value",
+          "https://example.invalid/?token=secret": "query-key",
+          "aaa.bbb.ccc": "jwt-key",
+        },
+      },
+    },
+  }));
+
+  try {
+    await writeStage1ABundleForTest(layout, {
+      protocolEvidence: {
+        files: [{
+          path: `C:\\Users\\${username}\\NutLivePlayer.dll`,
+          matches: [{ value: username, [sensitiveKey]: "hidden" }],
+        }],
+        markers: [],
+        messages: [],
+        paths: [],
+      },
+      report,
+    });
+    const persisted = [layout.binaryEvidenceJson, layout.reportJson, layout.reportMarkdown]
+      .map(path => readFile(path, "utf8"));
+    const combined = (await Promise.all(persisted)).join("\n");
+    assert.doesNotMatch(combined, /sycan|linux-user|unc-user|Z:\\Secret|sensitive-path-key|standalone-key|query-key|jwt-key|token-field-value|token=secret/ui);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
 test("canonical ordering ignores adversarial object-key insertion order", async () => {
   const firstLayout = await createLayout();
   const secondLayout = await createLayout();
@@ -445,8 +497,70 @@ test("evidence directory identity change aborts before formal installation", asy
   }
 });
 
+test("a target resurrected after backup is preserved and never overwritten by install or rollback", async () => {
+  const layout = await createLayout();
+  await mkdir(layout.evidenceDir, { recursive: true });
+  await writeFile(layout.binaryEvidenceJson, "old-binary");
+  await writeFile(layout.reportJson, "old-json");
+  await writeFile(layout.reportMarkdown, "old-markdown");
+  let replacementCreated = false;
+  const unlinkWithResurrection = async path => {
+    await unlink(path);
+    if (path === layout.reportMarkdown && !replacementCreated) {
+      replacementCreated = true;
+      await writeFile(layout.binaryEvidenceJson, "attacker-replacement");
+    }
+    return undefined;
+  };
+
+  try {
+    await assert.rejects(writeStage1ABundleForTest(layout, {
+      protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
+      report: buildStage1AReport(blockedInput()),
+    }, { unlink: unlinkWithResurrection }), /transaction_rollback_failed/u);
+    assert.equal(await readFile(layout.binaryEvidenceJson, "utf8"), "attacker-replacement");
+    const backups = (await readdir(layout.evidenceDir)).filter(name => name.endsWith(".backup"));
+    assert.equal(backups.length, 1);
+    assert.equal(await readFile(join(layout.evidenceDir, backups[0]), "utf8"), "old-binary");
+    assert.equal(await readFile(layout.reportJson, "utf8"), "old-json");
+    assert.equal(await readFile(layout.reportMarkdown, "utf8"), "old-markdown");
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("hard-link unavailability fails closed without moving or deleting old formal artifacts", async () => {
+  const layout = await createLayout();
+  await mkdir(layout.evidenceDir, { recursive: true });
+  const old = new Map([
+    [layout.binaryEvidenceJson, "old-binary"],
+    [layout.reportJson, "old-json"],
+    [layout.reportMarkdown, "old-markdown"],
+  ]);
+  for (const [file, contents] of old) await writeFile(file, contents);
+  const unavailableLink = async () => {
+    const error = new Error("hard links unavailable");
+    error.code = "EPERM";
+    throw error;
+  };
+  try {
+    await assert.rejects(writeStage1ABundleForTest(layout, {
+      protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
+      report: buildStage1AReport(blockedInput()),
+    }, { link: unavailableLink }));
+    for (const [file, contents] of old) assert.equal(await readFile(file, "utf8"), contents);
+    assert.deepEqual((await readdir(layout.evidenceDir)).sort(), [
+      "binary-protocol-evidence.json",
+      "stage1a-report.json",
+      "stage1a-report.md",
+    ]);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
 for (const failInstallAt of [2, 3]) {
-  test(`bundle rollback restores all three old files when install rename ${failInstallAt} fails`, async () => {
+  test(`bundle rollback restores all three old files when install link ${failInstallAt} fails`, async () => {
     const layout = await createLayout();
     await mkdir(layout.evidenceDir, { recursive: true });
     const old = new Map([
@@ -455,20 +569,20 @@ for (const failInstallAt of [2, 3]) {
       [layout.reportMarkdown, "old-markdown"],
     ]);
     for (const [file, contents] of old) await writeFile(file, contents);
-    let installRenames = 0;
-    const renameWithFailure = async (source, target) => {
-      if (/\.stage$/u.test(source) && ++installRenames === failInstallAt) {
+    let installLinks = 0;
+    const linkWithFailure = async (source, target) => {
+      if (/\.stage$/u.test(source) && ++installLinks === failInstallAt) {
         const error = new Error("injected install failure");
         error.code = "EIO";
         throw error;
       }
-      return rename(source, target);
+      return link(source, target);
     };
     try {
       await assert.rejects(writeStage1ABundleForTest(layout, {
         protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
         report: buildStage1AReport(blockedInput()),
-      }, { rename: renameWithFailure }));
+      }, { link: linkWithFailure }));
       for (const [file, contents] of old) assert.equal(await readFile(file, "utf8"), contents);
       assert.deepEqual((await readdir(layout.evidenceDir)).sort(), [
         "binary-protocol-evidence.json",
@@ -480,6 +594,106 @@ for (const failInstallAt of [2, 3]) {
     }
   });
 }
+
+test("perform-then-reject link and unlink operations are reconciled to an all-old rollback", async () => {
+  const layout = await createLayout();
+  await mkdir(layout.evidenceDir, { recursive: true });
+  const old = new Map([
+    [layout.binaryEvidenceJson, "old-binary"],
+    [layout.reportJson, "old-json"],
+    [layout.reportMarkdown, "old-markdown"],
+  ]);
+  for (const [file, contents] of old) await writeFile(file, contents);
+
+  let backupLinkRejected = false;
+  let installLinks = 0;
+  let secondInstallFailed = false;
+  const linkWithAmbiguousResults = async (source, target) => {
+    if (source === layout.binaryEvidenceJson && /\.backup$/u.test(target) && !backupLinkRejected) {
+      backupLinkRejected = true;
+      await link(source, target);
+      throw new Error("backup link performed then rejected");
+    }
+    if (/\.stage$/u.test(source)) {
+      installLinks += 1;
+      if (installLinks === 1) {
+        await link(source, target);
+        throw new Error("install link performed then rejected");
+      }
+      if (installLinks === 2) {
+        secondInstallFailed = true;
+        throw new Error("second install failed");
+      }
+    }
+    return link(source, target);
+  };
+  let backupUnlinkRejected = false;
+  let rollbackUnlinkRejected = false;
+  const unlinkWithAmbiguousResults = async path => {
+    if (path === layout.binaryEvidenceJson && !backupUnlinkRejected) {
+      backupUnlinkRejected = true;
+      await unlink(path);
+      throw new Error("backup unlink performed then rejected");
+    }
+    if (path === layout.binaryEvidenceJson && secondInstallFailed && !rollbackUnlinkRejected) {
+      rollbackUnlinkRejected = true;
+      await unlink(path);
+      throw new Error("rollback unlink performed then rejected");
+    }
+    return unlink(path);
+  };
+
+  try {
+    await assert.rejects(writeStage1ABundleForTest(layout, {
+      protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
+      report: buildStage1AReport(blockedInput()),
+    }, { link: linkWithAmbiguousResults, unlink: unlinkWithAmbiguousResults }));
+    for (const [file, contents] of old) assert.equal(await readFile(file, "utf8"), contents);
+    assert.deepEqual((await readdir(layout.evidenceDir)).sort(), [
+      "binary-protocol-evidence.json",
+      "stage1a-report.json",
+      "stage1a-report.md",
+    ]);
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
+
+test("rollback unlink failure never overwrites the installed identity and preserves the old backup", async () => {
+  const layout = await createLayout();
+  await mkdir(layout.evidenceDir, { recursive: true });
+  await writeFile(layout.binaryEvidenceJson, "old-binary");
+  await writeFile(layout.reportJson, "old-json");
+  await writeFile(layout.reportMarkdown, "old-markdown");
+  let installLinks = 0;
+  let rollbackStarted = false;
+  const linkWithSecondInstallFailure = async (source, target) => {
+    if (/\.stage$/u.test(source) && ++installLinks === 2) {
+      rollbackStarted = true;
+      throw new Error("second install failed");
+    }
+    return link(source, target);
+  };
+  const unlinkWithRollbackFailure = async path => {
+    if (rollbackStarted && path === layout.binaryEvidenceJson) throw new Error("rollback unlink failed");
+    return unlink(path);
+  };
+
+  try {
+    await assert.rejects(writeStage1ABundleForTest(layout, {
+      protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
+      report: buildStage1AReport(blockedInput()),
+    }, { link: linkWithSecondInstallFailure, unlink: unlinkWithRollbackFailure }), /transaction_rollback_failed/u);
+    assert.notEqual(await readFile(layout.binaryEvidenceJson, "utf8"), "old-binary");
+    const backups = (await readdir(layout.evidenceDir)).filter(name => name.startsWith(".binary-protocol-evidence.json.") && name.endsWith(".backup"));
+    assert.equal(backups.length, 1);
+    assert.equal(await readFile(join(layout.evidenceDir, backups[0]), "utf8"), "old-binary");
+    assert.equal(await readFile(layout.reportJson, "utf8"), "old-json");
+    assert.equal(await readFile(layout.reportMarkdown, "utf8"), "old-markdown");
+  } finally {
+    await rm(layout.root, { recursive: true, force: true });
+  }
+});
 
 test("rollback restores an old target when the post-backup stability check fails", async () => {
   const layout = await createLayout();
@@ -493,8 +707,8 @@ test("rollback restores an old target when the post-backup stability check fails
 
   let backedUp = false;
   let injected = false;
-  const renameThenSignal = async (source, target) => {
-    await rename(source, target);
+  const linkThenSignal = async (source, target) => {
+    await link(source, target);
     if (source === layout.binaryEvidenceJson && /\.backup$/u.test(target)) backedUp = true;
   };
   const realpathWithOneFailure = async path => {
@@ -509,7 +723,7 @@ test("rollback restores an old target when the post-backup stability check fails
     await assert.rejects(writeStage1ABundleForTest(layout, {
       protocolEvidence: { files: [], markers: [], messages: [], paths: [] },
       report: buildStage1AReport(blockedInput()),
-    }, { realpath: realpathWithOneFailure, rename: renameThenSignal }));
+    }, { realpath: realpathWithOneFailure, link: linkThenSignal }));
     for (const [file, contents] of old) assert.equal(await readFile(file, "utf8"), contents);
     assert.deepEqual((await readdir(layout.evidenceDir)).sort(), [
       "binary-protocol-evidence.json",
