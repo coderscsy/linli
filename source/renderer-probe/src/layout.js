@@ -1,4 +1,6 @@
-import { dirname, isAbsolute, relative, resolve, win32 } from "node:path";
+import { isAbsolute, relative, resolve, win32 } from "node:path";
+
+const PRODUCTION_ROOT = win32.resolve("I:\\OliviaSoulData\\MidiRenderer");
 
 export function assertContained(parent, child) {
   const root = resolve(parent);
@@ -10,10 +12,12 @@ export function assertContained(parent, child) {
   return target;
 }
 
-export function resolveProbeLayout(dataRoot, { requiredDrive = "I:" } = {}) {
+export function resolveProbeLayout(dataRoot) {
   const root = win32.resolve(dataRoot);
-  if (win32.parse(root).root.slice(0, 2).toUpperCase() !== requiredDrive.toUpperCase()) {
-    throw new Error(`运行数据根目录必须位于 ${requiredDrive.slice(0, 1)} 盘: ${root}`);
+  try {
+    assertContained(PRODUCTION_ROOT, root);
+  } catch {
+    throw new Error(`运行数据根目录必须位于 I 盘规范目录: ${root}`);
   }
   const evidenceDir = assertContained(root, win32.join(root, "evidence"));
   return Object.freeze({

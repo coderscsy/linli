@@ -12,3 +12,20 @@ test("redacts token fields and JWT-looking strings recursively", () => {
     nested: ["[REDACTED]", "ovilia_Win64_Development_15918"],
   });
 });
+
+test("does not execute throwing accessors", () => {
+  const value = {};
+  Object.defineProperty(value, "danger", {
+    get() {
+      throw new Error("secret JWT aaa.bbb.ccc");
+    },
+    enumerable: true,
+  });
+  assert.deepEqual(redactSecrets(value), { danger: "[UNREADABLE]" });
+});
+
+test("replaces circular references with a safe placeholder", () => {
+  const value = { name: "safe" };
+  value.self = value;
+  assert.deepEqual(redactSecrets(value), { name: "safe", self: "[CIRCULAR]" });
+});
