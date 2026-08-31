@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { validateRendererCandidate } from "../src/candidate.js";
 import * as candidateModule from "../src/candidate.js";
-import { validateRendererCandidateForTest } from "../test-support/candidate-test-seam.js";
+import { validateRendererCandidateForTest } from "../test-support/internal/candidate-test-seam.js";
 
 async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
@@ -199,6 +199,237 @@ test("rejects an over-limit candidate from metadata before streaming its PAK", a
     assert.equal(result.status, "incomplete");
     assert.ok(result.missing.includes("candidate byte limit exceeded"));
     assert.equal(pakStreamOpened, false);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("accepts a complete candidate whose Windows path components use mixed case", async () => {
+  const fixture = await createCandidate();
+  const mixedRoot = join(fixture.root, "wallpaper", "tPrEnDeR");
+  const fsPromises = await import("node:fs/promises");
+  try {
+    await fsPromises.rename(fixture.renderer, mixedRoot);
+    await fsPromises.rename(join(mixedRoot, "Binaries"), join(mixedRoot, "bInArIeS"));
+    await fsPromises.rename(join(mixedRoot, "bInArIeS", "Win64"), join(mixedRoot, "bInArIeS", "wIn64"));
+    await fsPromises.rename(join(mixedRoot, "Content"), join(mixedRoot, "cOnTeNt"));
+    await fsPromises.rename(join(mixedRoot, "cOnTeNt", "Paks"), join(mixedRoot, "cOnTeNt", "pAkS"));
+    await fsPromises.rename(join(mixedRoot, "Config"), join(mixedRoot, "cOnFiG"));
+    await fsPromises.rename(join(mixedRoot, "bInArIeS", "wIn64", "TPRender-Win64-Shipping.dll"), join(mixedRoot, "bInArIeS", "wIn64", "tPrEnDeR-Win64-Shipping.DLL"));
+    await fsPromises.rename(join(mixedRoot, "cOnTeNt", "pAkS", "TPRender-Windows.pak"), join(mixedRoot, "cOnTeNt", "pAkS", "TPRender-Windows.PAK"));
+    await fsPromises.rename(join(mixedRoot, "cOnFiG", "DefaultEngine.ini"), join(mixedRoot, "cOnFiG", "dEfAuLtEnGiNe.InI"));
+    const executable = join(mixedRoot, "bInArIeS", "wIn64", "Olivia.exe");
+    const result = await validateRendererCandidate(executable);
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.missing, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects the aggregate metadata limit before opening any candidate file", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let openCalls = 0;
+  const fsAdapter = {
+    lstat,
+    realpath: fsPromises.realpath,
+    readdir: fsPromises.readdir,
+    open: async () => { openCalls += 1; throw new Error("must not open"); },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter, { maxTotalBytes: 1 });
+    assert.equal(result.status, "incomplete");
+    assert.deepEqual(result.missing, ["candidate byte limit exceeded"]);
+    assert.equal(openCalls, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("does not start a stream when the path escapes after open and before handle validation", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let opened = false;
+  let readStarted = false;
+  const fsAdapter = {
+    lstat,
+    readdir: fsPromises.readdir,
+    realpath: async path => opened && path === fixture.executable ? join(fixture.root, "outside", "Olivia.exe") : fsPromises.realpath(path),
+    open: async path => {
+      opened = true;
+      const handle = await fsPromises.open(path, "r");
+      return {
+        stat: () => handle.stat(),
+        close: () => handle.close(),
+        createReadStream: () => {
+          readStarted = true;
+          return handle.createReadStream({ autoClose: false });
+        },
+      };
+    },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter);
+    assert.equal(result.status, "incomplete");
+    assert.equal(readStarted, false);
+    assert.ok(result.missing.includes("candidate path escapes renderer root"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("does not open a file when it is replaced before open validation", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let executableStats = 0;
+  let openCalls = 0;
+  const fsAdapter = {
+    lstat: async path => {
+      if (path === fixture.executable) executableStats += 1;
+      return lstat(path);
+    },
+    readdir: fsPromises.readdir,
+    realpath: async path => path === fixture.executable && executableStats >= 7 ? join(fixture.root, "outside", "Olivia.exe") : fsPromises.realpath(path),
+    open: async () => { openCalls += 1; throw new Error("must not open replaced path"); },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter);
+    assert.equal(result.status, "incomplete");
+    assert.equal(openCalls, 0);
+    assert.ok(result.missing.includes("candidate path escapes renderer root"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("uses one verified FileHandle stream for MZ, SHA-256, and byte count", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let handleStreams = 0;
+  const fsAdapter = {
+    lstat,
+    realpath: fsPromises.realpath,
+    readdir: fsPromises.readdir,
+    open: async (path, flags) => {
+      const handle = await fsPromises.open(path, flags);
+      return {
+        stat: () => handle.stat(),
+        close: () => handle.close(),
+        createReadStream: options => {
+          handleStreams += 1;
+          return handle.createReadStream(options);
+        },
+      };
+    },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter);
+    const executable = result.files.find(file => file.path === "Binaries/Win64/Olivia.exe");
+    assert.equal(result.status, "complete");
+    assert.equal(handleStreams, result.files.length);
+    assert.equal(executable.sha256, await sha256(fixture.executable));
+    assert.equal(executable.size, 3);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("drops all output when a handle changes size after its stream completes", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let streamFinished = false;
+  const fsAdapter = {
+    lstat,
+    realpath: fsPromises.realpath,
+    readdir: fsPromises.readdir,
+    open: async (path, flags) => {
+      const handle = await fsPromises.open(path, flags);
+      let statCalls = 0;
+      return {
+        stat: async () => {
+          const stats = await handle.stat();
+          statCalls += 1;
+          if (path === fixture.executable && streamFinished && statCalls > 1) {
+            const changed = Object.create(stats);
+            Object.defineProperty(changed, "size", { value: stats.size + 1 });
+            return changed;
+          }
+          return stats;
+        },
+        close: () => handle.close(),
+        createReadStream: options => {
+          const stream = handle.createReadStream(options);
+          stream.once("end", () => { streamFinished = true; });
+          return stream;
+        },
+      };
+    },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter);
+    assert.equal(result.status, "incomplete");
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.missing, ["candidate changed during validation"]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("caps the final file stream at the remaining aggregate byte budget", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  const highWaterMarks = [];
+  const total = 3 + 3 + Buffer.byteLength("[/Script/Engine.Engine]\n") + Buffer.byteLength("pak-fixture");
+  const fsAdapter = {
+    lstat,
+    realpath: fsPromises.realpath,
+    readdir: fsPromises.readdir,
+    open: async (path, flags) => {
+      const handle = await fsPromises.open(path, flags);
+      return {
+        stat: () => handle.stat(),
+        close: () => handle.close(),
+        createReadStream: options => {
+          highWaterMarks.push(options.highWaterMark);
+          return handle.createReadStream(options);
+        },
+      };
+    },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter, { maxTotalBytes: total });
+    assert.equal(result.status, "complete");
+    assert.equal(highWaterMarks.at(-1), Buffer.byteLength("pak-fixture"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("falls back to readonly open only when O_NOFOLLOW is unsupported", async () => {
+  const fixture = await createCandidate();
+  const fsPromises = await import("node:fs/promises");
+  let rejectedNoFollow = false;
+  const fsAdapter = {
+    lstat,
+    realpath: fsPromises.realpath,
+    readdir: fsPromises.readdir,
+    openFlags: 0x20000,
+    open: async (path, flags) => {
+      if (flags === 0x20000) {
+        rejectedNoFollow = true;
+        const error = new Error("unsupported");
+        error.code = "EINVAL";
+        throw error;
+      }
+      assert.equal(flags, 0);
+      return fsPromises.open(path, flags);
+    },
+  };
+  try {
+    const result = await validateRendererCandidateForTest(fixture.executable, fsAdapter);
+    assert.equal(rejectedNoFollow, true);
+    assert.equal(result.status, "complete");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
