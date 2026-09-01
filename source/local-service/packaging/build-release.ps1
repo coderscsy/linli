@@ -198,7 +198,7 @@ if (-not $ffmpegRoot) { throw "FFmpeg 下载包结构不正确" }
 Copy-PublicFile (Join-Path $ffmpegRoot.FullName "bin\ffmpeg.exe") (Join-Path $stage "runtime\ffmpeg\bin\ffmpeg.exe")
 Copy-PublicFile (Join-Path $ffmpegRoot.FullName "LICENSE.txt") (Join-Path $stage "runtime\ffmpeg\LICENSE.txt")
 
-foreach ($name in @("server.js", "transcription.js", "remote-memory.js", "soul-bundle.js")) {
+foreach ($name in @("server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js")) {
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
 }
 Copy-PublicFile (Join-Path $project "package.json") (Join-Path $stage "app\package.json")
@@ -209,7 +209,7 @@ foreach ($name in @("controller.js", "node-host.js", "startup-task.ps1")) {
 }
 
 $scriptTarget = Join-Path $stage "resources\workspace-template\.cursor\skills\fit-letters\scripts"
-foreach ($name in @("deepseek-reply.ps1", "harness-live.ps1", "harness-4step.ps1", "history-retrieval.ps1", "refresh-live-memory.ps1", "memory-lib.ps1", "ds-call.ps1", "score-temp.ps1", "sqlite-memory-load.cjs")) {
+foreach ($name in @("deepseek-reply.ps1", "harness-live.ps1", "harness-4step.ps1", "history-retrieval.ps1", "refresh-live-memory.ps1", "memory-lib.ps1", "ds-call.ps1", "model-call.ps1", "score-temp.ps1", "sqlite-memory-load.cjs")) {
     Copy-PublicFile (Join-Path $repository ".cursor\skills\fit-letters\scripts\$name") (Join-Path $scriptTarget $name)
 }
 Copy-PublicFile (Join-Path $repository "林离人设.md") (Join-Path $stage "resources\workspace-template\林离人设.md")

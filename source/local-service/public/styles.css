@@ -200,8 +200,24 @@ small { display: block; color: #77777d; font-size: 11px; margin-top: 2px; }
 .memoryProgress.paused .memoryProgressTrack span { background: #a79578; }
 .memoryProgress.failed { border-color: #613e42; color: #d49a9a; }
 .memoryProgress.failed .memoryProgressTrack span { background: #9b5158; }
+.modelSettingsHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.activeProvider {
+  border: 1px solid #536456;
+  border-radius: 999px;
+  background: #263029;
+  color: #aebcaf;
+  padding: 5px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.providerSwitch { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.providerSwitch select { width: 100%; }
+.providerHint { margin: 8px 0 14px; color: #7f7f85; font-size: 11px; }
+.modelProfile { border: 1px solid #2d2e34; border-radius: 8px; background: #1d1e22; padding: 14px; }
+.modelProfile[hidden] { display: none; }
 .modelSettings, .importRow { display: grid; gap: 12px; }
-.modelSettings > div > input, .secretInput input, .importRow > input:not(.nativeFile), textarea { width: 100%; }
+.modelSettings > div > input, .modelSettings > div > select, .secretInput input, .importRow > input:not(.nativeFile), textarea { width: 100%; }
+.localModelFields { grid-template-columns: 1fr 1fr; }
 .secretInput { position: relative; }
 .secretInput input { padding-right: 44px; }
 .secretInput input::-ms-reveal, .secretInput input::-ms-clear { display: none; }
@@ -390,6 +406,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .workspace { grid-template-columns: 1fr; }
   .sidebar { position: static; min-height: 0; }
   .customFields:not([hidden]) { grid-template-columns: 1fr; }
+  .providerSwitch, .localModelFields { grid-template-columns: 1fr; }
+  .modelSettingsHead { align-items: flex-start; flex-direction: column; }
   .identityFields { grid-template-columns: 1fr; }
   .actions { flex-wrap: wrap; }
   .exchangeHead { align-items: stretch; flex-wrap: wrap; }

@@ -9,6 +9,7 @@ let noticeResolver = null;
 let transcriptionSelection = null;
 let transcriptionJobId = null;
 let remoteMemoryJobId = null;
+let modelConfiguration = null;
 const safely = handler => async event => {
   try {
     await handler(event);
@@ -191,17 +192,80 @@ function renderClientMountStatus(status) {
   $("#restoreClient").disabled = !status.clientSelected;
 }
 
-function renderDeepSeek(config) {
-  $("#apiKey").value = config.apiKey;
-  $("#apiKey").placeholder = "填写 API Key，默认 DeepSeek";
-  $("#apiKey").type = "password";
-  $("#toggleApiKey").classList.remove("isVisible");
-  $("#toggleApiKey").title = "显示 API Key";
-  $("#toggleApiKey").setAttribute("aria-label", "显示 API Key");
-  $("#customModel").checked = config.custom;
-  $("#modelName").value = config.model;
-  $("#modelBaseUrl").value = config.baseUrl;
-  $("#customFields").hidden = !config.custom;
+function resetSecretInput(inputSelector, buttonSelector) {
+  $(inputSelector).type = "password";
+  $(buttonSelector).classList.remove("isVisible");
+  $(buttonSelector).title = "显示 API Key";
+  $(buttonSelector).setAttribute("aria-label", "显示 API Key");
+}
+
+function renderDeepSeek(profile) {
+  $("#apiKey").value = profile.apiKey ?? "";
+  $("#apiKey").placeholder = "填写 DeepSeek API Key";
+  resetSecretInput("#apiKey", "#toggleApiKey");
+  const custom = profile.model !== "deepseek-v4-pro" || profile.baseUrl !== "https://api.deepseek.com";
+  $("#customModel").checked = custom;
+  $("#modelName").value = profile.model;
+  $("#modelBaseUrl").value = profile.baseUrl;
+  $("#customFields").hidden = !custom;
+}
+
+function renderLocalModel(profile) {
+  $("#localApiKey").value = profile.apiKey ?? "";
+  resetSecretInput("#localApiKey", "#toggleLocalApiKey");
+  $("#localModelName").value = profile.model;
+  $("#localModelBaseUrl").value = profile.baseUrl;
+  $("#localAuthMode").value = profile.authMode;
+  $("#localApiKeyField").hidden = profile.authMode !== "bearer";
+}
+
+function showModelProfile(provider) {
+  document.querySelectorAll("[data-model-profile]").forEach(panel => {
+    panel.hidden = panel.dataset.modelProfile !== provider;
+  });
+  const active = modelConfiguration?.activeProvider;
+  $("#activateModelProvider").disabled = provider === active;
+  $("#activateModelProvider").textContent = provider === active ? "当前已启用" : "设为当前模型";
+}
+
+function renderModelConfig(config, preserveSelection = false) {
+  modelConfiguration = config;
+  const selected = preserveSelection ? $("#modelProvider").value : config.activeProvider;
+  $("#activeModelProvider").textContent = config.activeProvider === "local" ? "当前：本地 Gemma" : "当前：DeepSeek";
+  $("#modelProvider").value = selected;
+  renderDeepSeek(config.profiles.deepseek);
+  renderLocalModel(config.profiles.local);
+  showModelProfile(selected);
+}
+
+function toggleSecret(inputSelector, button) {
+  const input = $(inputSelector);
+  const visible = input.type === "text";
+  input.type = visible ? "password" : "text";
+  button.classList.toggle("isVisible", !visible);
+  button.title = visible ? "显示 API Key" : "隐藏 API Key";
+  button.setAttribute("aria-label", button.title);
+}
+
+function deepSeekProfileFromForm() {
+  const custom = $("#customModel").checked;
+  return {
+    provider: "deepseek",
+    apiKey: $("#apiKey").value,
+    authMode: "bearer",
+    model: custom ? $("#modelName").value : "deepseek-v4-pro",
+    baseUrl: custom ? $("#modelBaseUrl").value : "https://api.deepseek.com",
+  };
+}
+
+function localProfileFromForm() {
+  return {
+    provider: "local",
+    apiKey: $("#localApiKey").value,
+    authMode: $("#localAuthMode").value,
+    model: $("#localModelName").value,
+    baseUrl: $("#localModelBaseUrl").value,
+  };
 }
 
 function escapeHtml(value) {
@@ -325,15 +389,15 @@ async function saveMemory() {
 }
 
 async function refresh() {
-  const [status, identity, deepSeek, memoryStatus] = await Promise.all([
+  const [status, identity, modelConfig, memoryStatus] = await Promise.all([
     api("/admin/api/status"),
     api("/admin/api/identity"),
-    api("/admin/api/deepseek"),
+    api("/admin/api/model"),
     api("/admin/api/memory/status"),
   ]);
   renderStatus(status);
   renderIdentity(identity);
-  renderDeepSeek(deepSeek);
+  renderModelConfig(modelConfig);
   renderMemoryStatus(memoryStatus);
   if (window.oliviaDesktop) renderClientMountStatus(await window.oliviaDesktop.getClientStatus());
 }
@@ -505,12 +569,16 @@ $("#memoryProgress").addEventListener("click", safely(async () => {
   renderMemoryStatus(await api("/admin/api/memory/refresh", { method: "POST", body: "{}" }));
 }));
 $("#toggleApiKey").addEventListener("click", event => {
-  const visible = $("#apiKey").type === "text";
-  $("#apiKey").type = visible ? "password" : "text";
-  event.currentTarget.classList.toggle("isVisible", !visible);
-  event.currentTarget.title = visible ? "显示 API Key" : "隐藏 API Key";
-  event.currentTarget.setAttribute("aria-label", event.currentTarget.title);
+  toggleSecret("#apiKey", event.currentTarget);
 });
+$("#toggleLocalApiKey").addEventListener("click", event => {
+  toggleSecret("#localApiKey", event.currentTarget);
+});
+$("#modelProvider").addEventListener("change", event => showModelProfile(event.target.value));
+$("#localAuthMode").addEventListener("change", safely(async event => {
+  $("#localApiKeyField").hidden = event.target.value !== "bearer";
+  await saveLocalModelConfig();
+}));
 $("#customModel").addEventListener("change", safely(async event => {
   $("#customFields").hidden = !event.target.checked;
   await saveDeepSeekConfig();
@@ -598,17 +666,20 @@ const saveIdentity = safely(async () => {
 $("#offlineUid").addEventListener("change", saveIdentity);
 $("#offlineNickname").addEventListener("change", saveIdentity);
 async function saveDeepSeekConfig() {
-  const result = await api("/admin/api/deepseek", {
+  const result = await api("/admin/api/model/profile", {
     method: "POST",
-    body: JSON.stringify({
-      apiKey: $("#apiKey").value,
-      custom: $("#customModel").checked,
-      model: $("#modelName").value,
-      baseUrl: $("#modelBaseUrl").value,
-    }),
+    body: JSON.stringify(deepSeekProfileFromForm()),
   });
-  renderDeepSeek(result);
+  renderModelConfig(result, true);
   $("#deepSeekResult").textContent = "已自动保存";
+}
+async function saveLocalModelConfig() {
+  const result = await api("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify(localProfileFromForm()),
+  });
+  renderModelConfig(result, true);
+  $("#localModelResult").textContent = "已自动保存";
 }
 const saveDeepSeek = safely(saveDeepSeekConfig);
 $("#apiKey").addEventListener("change", saveDeepSeek);
@@ -616,16 +687,34 @@ $("#modelName").addEventListener("change", saveDeepSeek);
 $("#modelBaseUrl").addEventListener("change", saveDeepSeek);
 $("#testDeepSeek").addEventListener("click", safely(async () => {
   $("#deepSeekResult").textContent = "正在测试……";
-  await api("/admin/api/deepseek/test", {
+  await saveDeepSeekConfig();
+  await api("/admin/api/model/test", {
     method: "POST",
-    body: JSON.stringify({
-      apiKey: $("#apiKey").value,
-      custom: $("#customModel").checked,
-      model: $("#modelName").value,
-      baseUrl: $("#modelBaseUrl").value,
-    }),
+    body: JSON.stringify({ provider: "deepseek" }),
   });
   $("#deepSeekResult").textContent = "连接成功";
+}));
+const saveLocalModel = safely(saveLocalModelConfig);
+$("#localApiKey").addEventListener("change", saveLocalModel);
+$("#localModelName").addEventListener("change", saveLocalModel);
+$("#localModelBaseUrl").addEventListener("change", saveLocalModel);
+$("#testLocalModel").addEventListener("click", safely(async () => {
+  $("#localModelResult").textContent = "正在测试……";
+  await saveLocalModelConfig();
+  await api("/admin/api/model/test", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+  $("#localModelResult").textContent = "连接成功";
+}));
+$("#activateModelProvider").addEventListener("click", safely(async () => {
+  const provider = $("#modelProvider").value;
+  const result = await api("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider }),
+  });
+  renderModelConfig(result, true);
+  $(provider === "local" ? "#localModelResult" : "#deepSeekResult").textContent = "已设为当前模型";
 }));
 $("#importContent").addEventListener("input", resetImportPreview);
 $("#aiImport").addEventListener("click", safely(async () => {

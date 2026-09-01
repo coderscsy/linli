@@ -1731,6 +1731,139 @@ test("OPTIONS 反射客户端来源并允许凭据", async t => {
   assert.equal(preflight.headers.get("access-control-allow-headers"), "x-rpc-device_fp,x-uid,x-token");
 });
 
+test("PowerShell 模型切换：本地档案不发送鉴权与 DeepSeek 专用字段", async () => {
+  let captured;
+  const api = createHttpServer((request, response) => {
+    const chunks = [];
+    request.on("data", chunk => chunks.push(chunk));
+    request.on("end", () => {
+      captured = {
+        url: request.url,
+        authorization: request.headers.authorization,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+      };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "local-ok" } }],
+        usage: { total_tokens: 3 },
+      }));
+    });
+  });
+  await new Promise(resolve => api.listen(0, "127.0.0.1", resolve));
+  const root = await mkdtemp(join(tmpdir(), "olivia-model-call-test-"));
+  try {
+    const secrets = join(root, ".cursor", "secrets");
+    await mkdir(secrets, { recursive: true });
+    await writeFile(join(secrets, "model.env"), [
+      "MODEL_ACTIVE_PROVIDER=local",
+      `MODEL_LOCAL_BASE=http://127.0.0.1:${api.address().port}/v1`,
+      "MODEL_LOCAL_MODEL=gemma-test",
+      "MODEL_LOCAL_AUTH_MODE=none",
+      "MODEL_LOCAL_API_KEY=",
+      "",
+    ].join("\n"));
+    const helper = new URL("../../.cursor/skills/fit-letters/scripts/model-call.ps1", import.meta.url).pathname.slice(1);
+    const quote = value => String(value).replaceAll("'", "''");
+    const runner = join(root, "run-model.ps1");
+    await writeFile(runner, [
+      "$ErrorActionPreference = 'Stop'",
+      `. '${quote(helper)}'`,
+      `Import-ModelConfig -Root '${quote(root)}'`,
+      "$content = Invoke-ModelChat -System 'system' -User 'user'",
+      "Write-Output $content",
+      "",
+    ].join("\n"));
+    const result = await execFileAsync("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runner,
+    ]);
+    assert.match(result.stdout, /local-ok/u);
+    assert.equal(captured.url, "/v1/chat/completions");
+    assert.equal(captured.authorization, undefined);
+    assert.equal(captured.body.model, "gemma-test");
+    assert.equal(captured.body.thinking, undefined);
+    assert.equal(captured.body.reasoning_effort, undefined);
+  } finally {
+    await new Promise(resolve => api.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PowerShell 模型切换：本地 503 只重试当前档案", async () => {
+  let attempts = 0;
+  const api = createHttpServer((request, response) => {
+    attempts += 1;
+    response.writeHead(503, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "local unavailable" }));
+  });
+  await new Promise(resolve => api.listen(0, "127.0.0.1", resolve));
+  const root = await mkdtemp(join(tmpdir(), "olivia-model-no-fallback-test-"));
+  try {
+    const secrets = join(root, ".cursor", "secrets");
+    await mkdir(secrets, { recursive: true });
+    await writeFile(join(secrets, "model.env"), [
+      "MODEL_ACTIVE_PROVIDER=local",
+      `MODEL_LOCAL_BASE=http://127.0.0.1:${api.address().port}/v1`,
+      "MODEL_LOCAL_MODEL=gemma-test",
+      "MODEL_LOCAL_AUTH_MODE=none",
+      "MODEL_LOCAL_API_KEY=",
+      "MODEL_DEEPSEEK_BASE=http://127.0.0.1:1",
+      "MODEL_DEEPSEEK_MODEL=never-call",
+      "MODEL_DEEPSEEK_AUTH_MODE=bearer",
+      "MODEL_DEEPSEEK_API_KEY=never-send",
+      "",
+    ].join("\n"));
+    const helper = new URL("../../.cursor/skills/fit-letters/scripts/model-call.ps1", import.meta.url).pathname.slice(1);
+    const quote = value => String(value).replaceAll("'", "''");
+    const runner = join(root, "run-model.ps1");
+    await writeFile(runner, [
+      "$ErrorActionPreference = 'Stop'",
+      `. '${quote(helper)}'`,
+      `Import-ModelConfig -Root '${quote(root)}'`,
+      "Invoke-ModelChat -System 'system' -User 'user'",
+      "",
+    ].join("\n"));
+    await assert.rejects(execFileAsync("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runner,
+    ]), /local HTTP 503/u);
+    assert.equal(attempts, 3);
+  } finally {
+    await new Promise(resolve => api.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("管理页手动切换模型：分别编辑测试并显式启用档案", async t => {
+  const ctx = await fixture();
+  t.after(() => ctx.close());
+  const base = `http://127.0.0.1:${ctx.service.server.address().port}`;
+  const [html, app, buildRelease, dsCall, deepSeekReply] = await Promise.all([
+    fetch(`${base}/admin/`).then(response => response.text()),
+    fetch(`${base}/admin/app.js`).then(response => response.text()),
+    readFile(new URL("../packaging/build-release.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../.cursor/skills/fit-letters/scripts/ds-call.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../.cursor/skills/fit-letters/scripts/deepseek-reply.ps1", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="modelProvider"/u);
+  assert.match(html, /value="deepseek"/u);
+  assert.match(html, /value="local"/u);
+  assert.match(html, /id="activeModelProvider"/u);
+  assert.match(html, /id="activateModelProvider"/u);
+  assert.match(html, /data-model-profile="deepseek"/u);
+  assert.match(html, /data-model-profile="local"/u);
+  assert.match(html, /id="testDeepSeek"/u);
+  assert.match(html, /id="testLocalModel"/u);
+  assert.match(html, /gemma-4-26b-a4b-it-ultra-uncensored-heretic/u);
+  assert.match(app, /\/admin\/api\/model\/profile/u);
+  assert.match(app, /\/admin\/api\/model\/test/u);
+  assert.match(app, /\/admin\/api\/model\/activate/u);
+  assert.match(app, /provider:\s*"deepseek"/u);
+  assert.match(app, /provider:\s*"local"/u);
+  assert.match(buildRelease, /"model-config\.js"/u);
+  assert.match(buildRelease, /"model-call\.ps1"/u);
+  assert.match(dsCall, /model-call\.ps1/u);
+  assert.match(deepSeekReply, /model-call\.ps1/u);
+});
+
 test("模型档案可独立保存测试并且只有手动激活才切换", async t => {
   const calls = [];
   const ctx = await fixture({

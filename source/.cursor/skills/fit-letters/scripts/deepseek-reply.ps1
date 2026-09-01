@@ -19,6 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $utf8 = New-Object System.Text.UTF8Encoding $false
+. (Join-Path $PSScriptRoot "model-call.ps1")
 
 if ([string]::IsNullOrWhiteSpace($Root)) {
     $Root = (Get-Location).Path
@@ -50,30 +51,7 @@ function Take-FromHeading([string]$text, [string]$heading) {
     return $t.Substring($idx).Trim()
 }
 
-function Load-Secrets {
-    $envFile = Join-Path $Root ".cursor\secrets\deepseek.env"
-    if (Test-Path -LiteralPath $envFile) {
-        foreach ($line in [IO.File]::ReadAllLines((Resolve-Path -LiteralPath $envFile).Path, $utf8)) {
-            if ($line -match "^\s*#" -or $line -match "^\s*$") { continue }
-            $eq = $line.IndexOf("=")
-            if ($eq -lt 1) { continue }
-            $k = $line.Substring(0, $eq).Trim()
-            $v = $line.Substring($eq + 1).Trim()
-            Set-Item -Path "Env:$k" -Value $v
-        }
-    }
-}
-
-Load-Secrets
-$key = $env:DEEPSEEK_API_KEY
-if ([string]::IsNullOrWhiteSpace($key)) {
-    Write-Error "DEEPSEEK_API_KEY not set. Put it in .cursor/secrets/deepseek.env"
-}
-$model = $env:DEEPSEEK_MODEL
-if ([string]::IsNullOrWhiteSpace($model)) { $model = "deepseek-v4-pro" }
-$base = $env:DEEPSEEK_BASE
-if ([string]::IsNullOrWhiteSpace($base)) { $base = "https://api.deepseek.com" }
-$uri = $base.TrimEnd("/") + "/chat/completions"
+Import-ModelConfig -Root $Root
 
 $writeHeading = "# " + [string]::Concat([char]0x5199, [char]0x6CD5)
 $personaHeading = "## " + [string]::Concat([char]0x57FA, [char]0x7840)
@@ -136,55 +114,7 @@ else {
     return
 }
 
-$payload = @{
-    model = $model
-    stream = $false
-    reasoning_effort = "high"
-    thinking = @{ type = "enabled" }
-    messages = @(
-        @{ role = "system"; content = $system }
-        @{ role = "user"; content = $user }
-    )
-}
-$json = ($payload | ConvertTo-Json -Depth 8 -Compress)
-$bytes = $utf8.GetBytes($json)
-
-$headers = @{
-    Authorization = "Bearer $key"
-}
-try {
-    $req = [Net.HttpWebRequest]::Create($uri)
-    $req.Method = "POST"
-    $req.ContentType = "application/json; charset=utf-8"
-    $req.Accept = "application/json"
-    $req.Timeout = 3600000
-    $req.ReadWriteTimeout = 3600000
-    $req.Headers.Add("Authorization", "Bearer $key")
-    $rs = $req.GetRequestStream()
-    $rs.Write($bytes, 0, $bytes.Length)
-    $rs.Close()
-    $httpResp = $req.GetResponse()
-    $sr = New-Object IO.StreamReader($httpResp.GetResponseStream(), $utf8)
-    $raw = $sr.ReadToEnd()
-    $sr.Close()
-    $httpResp.Close()
-    $res = $raw | ConvertFrom-Json
-}
-catch {
-    $webEx = $_.Exception.InnerException
-    if ($_.Exception -is [Net.WebException]) { $webEx = $_.Exception }
-    if ($webEx -and $webEx.Response) {
-        $errReader = New-Object IO.StreamReader($webEx.Response.GetResponseStream(), $utf8)
-        $errBody = $errReader.ReadToEnd()
-        Write-Error ("DeepSeek HTTP {0}: {1}" -f [int]$webEx.Response.StatusCode, $errBody)
-    }
-    throw
-}
-
-$content = $res.choices[0].message.content
-if ([string]::IsNullOrWhiteSpace($content)) {
-    Write-Error "DeepSeek returned empty content"
-}
+$content = Invoke-ModelChat -System $system -User $user
 
 $outDir = [IO.Path]::GetDirectoryName($OutFile)
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {

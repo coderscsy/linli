@@ -1,23 +1,23 @@
 ---
 name: fit-letters
 description: >-
-  逐封拟合测试林离回信：截断某人往来至来信、用 DeepSeek V4 Pro 盲测、对比原版的格式/风格/内容/长度，再调优规则。
+  逐封拟合测试林离回信：截断某人往来至来信、用当前手动启用的模型盲测、对比原版的格式/风格/内容/长度，再调优规则。
   Use when the user asks to 拟合、逐封测试、盲测回信、调规则、回归测试, or to compare generated Lin Li replies against archived originals.
 ---
 
 # 逐封拟合测试
 
-用已有规则，调用 DeepSeek V4 Pro 盲测，截断某个人的往来至前一条，发送信件，再判断回信格式、风格、内容、长度与原版的偏差；不断调优规则。
+用已有规则，调用当前手动启用的模型盲测，截断某个人的往来至前一条，发送信件，再判断回信格式、风格、内容、长度与原版的偏差；不断调优规则。
 
 规则以 `.cursor/rules/linli-letters.mdc` 为准。人设只补事实。禁止把测试集原句写进规则。
 
-拟合盲测和给用户写回信，一律走 `deepseek-v4-pro`（脚本 `.cursor/skills/fit-letters/scripts/deepseek-reply.ps1`）。不要用 Cursor 的 Task 子代理，也不要用当前对话模型冒充样本。当前对话模型只负责纳入、打分、改规则。
+拟合盲测、给用户写回信和记忆整理都走 `.cursor/secrets/model.env` 中手动启用的 `deepseek` 或 `local` 档案（脚本 `.cursor/skills/fit-letters/scripts/deepseek-reply.ps1`）。选择、保存或测试档案都不能替代显式启用，也不能在失败时自动改用另一档案。不要用 Cursor 的 Task 子代理，也不要用当前对话模型冒充样本。当前对话模型只负责纳入、打分、改规则。
 
 ## 隔离（硬性）
 
-DeepSeek 收不到仓库。脚本把规则的「写法」节、人设从「基础」起、截断上下文**读进提示词再发给 API**。YAML、控制层、人设升格说明、完整档案、其它 `_probe` 文件都不注入。模型没有文件工具。
+所选模型收不到仓库。脚本把规则的「写法」节、人设从「基础」起、截断上下文**读进提示词再发给 API**。YAML、控制层、人设升格说明、完整档案、其它 `_probe` 文件都不注入。模型没有文件工具。
 
-父代理可以读原版，用来打分。DeepSeek 不行。密钥在 `.cursor/secrets/deepseek.env`，不要写进规则、技能或往来档案。
+父代理可以读原版，用来打分。生成模型不行。模型档案在 `.cursor/secrets/model.env`；旧 `.cursor/secrets/deepseek.env` 仅作兼容来源。密钥不要写进规则、技能或往来档案。
 
 ## 流程
 
@@ -25,7 +25,7 @@ DeepSeek 收不到仓库。脚本把规则的「写法」节、人设从「基�
 拟合：
 - [ ] 1. 选定档案与测试点
 - [ ] 2. 物理截断，写入 _probe/
-- [ ] 3. DeepSeek V4 Pro 盲测（只出回信正文）
+- [ ] 3. 当前启用模型盲测（只出回信正文）
 - [ ] 4. 按四维对比原版
 - [ ] 5. 归成系统偏差，不是单封口味
 - [ ] 6. 只改 linli-letters.mdc；不加人设例句、不搬原句
@@ -54,9 +54,9 @@ powershell -NoProfile -File .cursor/skills/fit-letters/scripts/truncate-exchange
 
 写出 `_probe/ctx_{stem}_{NN}.md`。跑之前先看脚本末尾打印的最后一行，确认不是林离回信。
 
-## 3. DeepSeek 盲测（后台）
+## 3. 模型盲测（后台）
 
-密钥：`.cursor/secrets/deepseek.env` 的 `DEEPSEEK_API_KEY`。模型：`deepseek-v4-pro`。思考开着。
+当前档案：`.cursor/secrets/model.env` 的 `MODEL_ACTIVE_PROVIDER`。DeepSeek 默认使用 `deepseek-v4-pro` 和 Bearer 密钥；本地默认使用 Gemma 与无鉴权。DeepSeek 思考开着，本地请求不发送 DeepSeek 专用思考字段。
 
 **盲测必须后台跑。** 截断可以同步做；API 调用不要在对话里同步等。启动后立刻回到用户，打分等完成通知。不要轮询、不要空转等待。
 
@@ -97,7 +97,7 @@ powershell -NoProfile -File .cursor/skills/fit-letters/scripts/test-temp.ps1 -Ro
 powershell -NoProfile -File .cursor/skills/fit-letters/scripts/build-memory.ps1 -Person "{person}" -N 33 -Root "d:\OliviaSoul"
 ```
 
-摘要由 DeepSeek 生成，缓存在 `_probe/mem_cache/`；文件名同时绑定正文 MD5 与 Prompt 版本，改摘要规则会自动使用新缓存。摘要必须区分“他声称”和“她明确承认”，只负责为 STEP2 导航。逐封摘要要预生成时并发拉起，别串行等。
+摘要由当前启用模型生成，缓存在 `_probe/mem_cache/`；文件名同时绑定正文 MD5 与 Prompt 版本，改摘要规则会自动使用新缓存。摘要必须区分“他声称”和“她明确承认”，只负责为 STEP2 导航。逐封摘要要预生成时并发拉起，别串行等。
 
 Harness 把「预、写、验、改」拆开，脚本 `harness-4step.ps1`（提示词在 `harness/`）：
 
@@ -187,7 +187,7 @@ Harness 把「预、写、验、改」拆开，脚本 `harness-4step.ps1`（提�
 
 ## 不要
 
-- 不要让 DeepSeek 自己打分（它会往原版靠）
+- 不要让生成模型自己打分（它会往原版靠）
 - 不要写「比原版更合人设」；原版与人设打架也仍以原版打分
 - 不要为了贴近某一封把规则写成该封的复述
 - 不要把 A 的记忆段注入 B 的盲测或回信

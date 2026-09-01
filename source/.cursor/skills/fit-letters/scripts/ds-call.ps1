@@ -2,6 +2,7 @@
 # Dot-source this; call Initialize-Ds once, then Invoke-Ds.
 
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+. (Join-Path $PSScriptRoot "model-call.ps1")
 
 function Read-Utf8([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { throw "missing file: $path" }
@@ -33,35 +34,23 @@ function Take-FromHeading([string]$text, [string]$heading) {
 
 function Initialize-Ds {
     param([string]$Root)
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $envFile = Join-Path $Root ".cursor\secrets\deepseek.env"
-    if (Test-Path -LiteralPath $envFile) {
-        foreach ($line in [IO.File]::ReadAllLines((Resolve-Path -LiteralPath $envFile).Path, $script:Utf8NoBom)) {
-            if ($line -match "^\s*#" -or $line -match "^\s*$") { continue }
-            $eq = $line.IndexOf("=")
-            if ($eq -lt 1) { continue }
-            Set-Item -Path ("Env:" + $line.Substring(0, $eq).Trim()) -Value $line.Substring($eq + 1).Trim()
-        }
-    }
-    $script:DsKey = $env:DEEPSEEK_API_KEY
-    if ([string]::IsNullOrWhiteSpace($script:DsKey)) { throw "DEEPSEEK_API_KEY not set" }
-    $script:DsModel = $env:DEEPSEEK_MODEL
-    if ([string]::IsNullOrWhiteSpace($script:DsModel)) { $script:DsModel = "deepseek-v4-pro" }
-    $b = $env:DEEPSEEK_BASE
-    if ([string]::IsNullOrWhiteSpace($b)) { $b = "https://api.deepseek.com" }
-    $script:DsUri = $b.TrimEnd("/") + "/chat/completions"
-    $script:DsThinking = $true
+    Import-ModelConfig -Root $Root
+    $script:DsModel = $script:ModelName
+    $script:DsThinking = $script:ModelThinking
+    $script:DsLastFinishReason = $script:ModelLastFinishReason
+    $script:DsLastUsage = $script:ModelLastUsage
 }
 
 function Set-DsThinking {
     param([Parameter(Mandatory = $true)][bool]$On)
+    Set-ModelThinking -On $On
     $script:DsThinking = $On
 }
 
 function Set-DsModel {
     param([Parameter(Mandatory = $true)][string]$Model)
-    if ([string]::IsNullOrWhiteSpace($Model)) { throw "DeepSeek model cannot be empty" }
-    $script:DsModel = $Model
+    Set-ModelName -Model $Model
+    $script:DsModel = $script:ModelName
 }
 
 function Invoke-DsOnce {
@@ -69,53 +58,10 @@ function Invoke-DsOnce {
         [Parameter(Mandatory = $true)][string]$System,
         [Parameter(Mandatory = $true)][string]$User
     )
-    $payload = @{
-        model = $script:DsModel
-        stream = $false
-        messages = @(
-            @{ role = "system"; content = $System }
-            @{ role = "user"; content = $User }
-        )
-    }
-    if ($script:DsThinking) {
-        $payload.reasoning_effort = "high"
-        $payload.thinking = @{ type = "enabled" }
-    }
-    else {
-        $payload.thinking = @{ type = "disabled" }
-    }
-    $bytes = $script:Utf8NoBom.GetBytes(($payload | ConvertTo-Json -Depth 8 -Compress))
-    $req = [Net.HttpWebRequest]::Create($script:DsUri)
-    $req.Method = "POST"
-    $req.ContentType = "application/json; charset=utf-8"
-    $req.Accept = "application/json"
-    $req.Timeout = 500000
-    $req.ReadWriteTimeout = 500000
-    $req.Headers.Add("Authorization", "Bearer " + $script:DsKey)
-    $rs = $req.GetRequestStream()
-    $rs.Write($bytes, 0, $bytes.Length)
-    $rs.Close()
-    try {
-        $httpResp = $req.GetResponse()
-        $sr = New-Object IO.StreamReader($httpResp.GetResponseStream(), $script:Utf8NoBom)
-        $raw = $sr.ReadToEnd()
-        $sr.Close()
-        $httpResp.Close()
-    }
-    catch {
-        $webEx = $_.Exception
-        if ($webEx -is [Net.WebException] -and $webEx.Response) {
-            $errReader = New-Object IO.StreamReader($webEx.Response.GetResponseStream(), $script:Utf8NoBom)
-            throw ("DeepSeek HTTP {0}: {1}" -f [int]$webEx.Response.StatusCode, $errReader.ReadToEnd())
-        }
-        throw
-    }
-    $response = $raw | ConvertFrom-Json
-    $script:DsLastFinishReason = [string]$response.choices[0].finish_reason
-    $script:DsLastUsage = $response.usage
-    $content = $response.choices[0].message.content
-    if ([string]::IsNullOrWhiteSpace($content)) { throw "DeepSeek returned empty content" }
-    return $content.Trim()
+    $content = Invoke-ModelChatOnce -System $System -User $User
+    $script:DsLastFinishReason = $script:ModelLastFinishReason
+    $script:DsLastUsage = $script:ModelLastUsage
+    return $content
 }
 
 function Invoke-Ds {
@@ -123,21 +69,10 @@ function Invoke-Ds {
         [Parameter(Mandatory = $true)][string]$System,
         [Parameter(Mandatory = $true)][string]$User
     )
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        try {
-            return Invoke-DsOnce -System $System -User $User
-        }
-        catch {
-            $message = $_.Exception.Message
-            $retryable =
-                $message -match "DeepSeek returned empty content" -or
-                $message -match "DeepSeek HTTP (408|409|425|429|5\d\d)" -or
-                $_.Exception -is [Net.WebException]
-            if (-not $retryable -or $attempt -eq 3) { throw }
-            Write-Host ("DS RETRY attempt={0} reason={1}" -f ($attempt + 1), $message)
-            Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1))
-        }
-    }
+    $content = Invoke-ModelChat -System $System -User $User
+    $script:DsLastFinishReason = $script:ModelLastFinishReason
+    $script:DsLastUsage = $script:ModelLastUsage
+    return $content
 }
 
 function ConvertFrom-DsJson {

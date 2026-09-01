@@ -55,42 +55,96 @@
             <p id="identityResult" class="result autoSaveResult"></p>
           </section>
           <section class="settingsBlock">
-            <div class="settingsBlockHead">
-              <strong>AI 设置</strong>
-              <small>用于生成林离的回信与整理记忆</small>
-            </div>
-            <div class="modelSettings">
+            <div class="settingsBlockHead modelSettingsHead">
               <div>
-                <label for="apiKey">API Key</label>
-                <div class="secretInput">
-                  <input id="apiKey" type="password" autocomplete="off" placeholder="填写 API Key，默认 DeepSeek">
-                  <button id="toggleApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
-                      <circle cx="12" cy="12" r="2.8"></circle>
-                      <path class="eyeSlash" d="m5 4 14 16"></path>
-                    </svg>
-                  </button>
+                <strong>AI 设置</strong>
+                <small>用于生成林离的回信、整理记忆与转写文本</small>
+              </div>
+              <span id="activeModelProvider" class="activeProvider">当前：读取中</span>
+            </div>
+            <div class="providerSwitch">
+              <div>
+                <label for="modelProvider">编辑模型档案</label>
+                <select id="modelProvider">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="local">本地 Gemma</option>
+                </select>
+              </div>
+              <button id="activateModelProvider" type="button">设为当前模型</button>
+            </div>
+            <p class="providerHint">切换编辑项不会改变当前模型；只有点击“设为当前模型”才会切换。</p>
+
+            <div class="modelProfile" data-model-profile="deepseek">
+              <div class="modelSettings">
+                <div>
+                  <label for="apiKey">DeepSeek API Key</label>
+                  <div class="secretInput">
+                    <input id="apiKey" type="password" autocomplete="off" placeholder="填写 DeepSeek API Key">
+                    <button id="toggleApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                        <circle cx="12" cy="12" r="2.8"></circle>
+                        <path class="eyeSlash" d="m5 4 14 16"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <label class="checkbox">
+                  <input id="customModel" type="checkbox">
+                  <span>自定义模型与地址</span>
+                </label>
+                <div id="customFields" class="customFields" hidden>
+                  <div>
+                    <label for="modelName">模型名</label>
+                    <input id="modelName" placeholder="deepseek-v4-pro">
+                  </div>
+                  <div>
+                    <label for="modelBaseUrl">地址</label>
+                    <input id="modelBaseUrl" type="url" placeholder="https://api.deepseek.com">
+                  </div>
                 </div>
               </div>
-              <label class="checkbox">
-                <input id="customModel" type="checkbox">
-                <span>自定义模型与地址</span>
-              </label>
-              <div id="customFields" class="customFields" hidden>
-                <div>
-                  <label for="modelName">模型名</label>
-                  <input id="modelName" placeholder="模型名">
-                </div>
-                <div>
-                  <label for="modelBaseUrl">地址</label>
-                  <input id="modelBaseUrl" type="url" placeholder="https://example.com">
-                </div>
+              <div class="actions">
+                <button id="testDeepSeek" class="secondary" type="button">保存并测试 DeepSeek</button>
+                <span id="deepSeekResult" class="result"></span>
               </div>
             </div>
-            <div class="actions">
-              <button id="testDeepSeek" class="secondary">测试连通性</button>
-              <span id="deepSeekResult" class="result"></span>
+
+            <div class="modelProfile" data-model-profile="local" hidden>
+              <div class="modelSettings localModelFields">
+                <div>
+                  <label for="localModelName">模型名</label>
+                  <input id="localModelName" value="gemma-4-26b-a4b-it-ultra-uncensored-heretic" placeholder="gemma-4-26b-a4b-it-ultra-uncensored-heretic">
+                </div>
+                <div>
+                  <label for="localModelBaseUrl">地址</label>
+                  <input id="localModelBaseUrl" type="url" value="https://m4.tailf0d018.ts.net/v1" placeholder="https://m4.tailf0d018.ts.net/v1">
+                </div>
+                <div>
+                  <label for="localAuthMode">鉴权方式</label>
+                  <select id="localAuthMode">
+                    <option value="none">无需鉴权</option>
+                    <option value="bearer">Bearer API Key</option>
+                  </select>
+                </div>
+                <div id="localApiKeyField" hidden>
+                  <label for="localApiKey">本地接口 API Key</label>
+                  <div class="secretInput">
+                    <input id="localApiKey" type="password" autocomplete="off" placeholder="仅 Bearer 鉴权时填写">
+                    <button id="toggleLocalApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                        <circle cx="12" cy="12" r="2.8"></circle>
+                        <path class="eyeSlash" d="m5 4 14 16"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="actions">
+                <button id="testLocalModel" class="secondary" type="button">保存并测试本地 Gemma</button>
+                <span id="localModelResult" class="result"></span>
+              </div>
             </div>
           </section>
           <section id="serviceMountSettings" class="serviceMountSettings" hidden>
@@ -208,7 +262,7 @@
           <div class="panelHead">
             <div>
               <h2>视频转文字</h2>
-              <p>本地 Whisper 逐字转写，再由 DeepSeek 只做错字、标点和分段整理</p>
+              <p>本地 Whisper 逐字转写，再由当前启用的模型只做错字、标点和分段整理</p>
             </div>
           </div>
           <section class="taskCard">
@@ -237,7 +291,7 @@
             </section>
             <section>
               <label for="organizedTranscript">整理文字</label>
-              <textarea id="organizedTranscript" readonly placeholder="完成后显示 DeepSeek 整理文字"></textarea>
+              <textarea id="organizedTranscript" readonly placeholder="完成后显示当前模型整理的文字"></textarea>
             </section>
           </div>
         </section>
