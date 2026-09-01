@@ -25,37 +25,12 @@
 **Files:**
 - Modify: `README.md`
 - Modify: `source/local-service/packaging/使用说明.txt`
-- Modify: `source/local-service/test/api.test.js`
 
 **Interfaces:**
 - Produces: README download URLs under `https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.1/`.
 - Produces: packaged instructions covering manual `deepseek|local` selection and the local Gemma default.
 
-- [ ] **Step 1: Add a failing documentation contract test**
-
-Extend the existing release configuration test to read `README.md` and `packaging/使用说明.txt`, then assert:
-
-```js
-assert.match(readme, /^# 林离离线增强版/mu);
-assert.match(readme, /coderscsy\/linli\/releases\/download\/2008\.2\.7-linli\.1/u);
-assert.match(readme, /DeepSeek 与本地 Gemma/u);
-assert.match(readme, /自动生成林离人物语音视频[^\n]*尚未实现/u);
-assert.doesNotMatch(readme, /yilangren\/OliviaSoul\/releases/u);
-assert.match(instructions, /手动选择 DeepSeek 或本地 Gemma/u);
-```
-
-- [ ] **Step 2: Run the focused test and confirm RED**
-
-Run:
-
-```powershell
-Set-Location source\local-service
-node --test --test-name-pattern="独立 README 与发布说明" test/api.test.js
-```
-
-Expected: FAIL because the inherited README still links to the upstream release and the packaged instructions only describe DeepSeek.
-
-- [ ] **Step 3: Rewrite README and packaged instructions**
+- [ ] **Step 1: Rewrite README and packaged instructions**
 
 Write a concise user guide with these exact sections:
 
@@ -72,11 +47,11 @@ Write a concise user guide with these exact sections:
 
 Use exact release asset links, explain manual activation rather than implicit switching, keep the game-directory installation warning prominent, and retain only a brief upstream attribution in the final section.
 
-- [ ] **Step 4: Run the focused test and confirm GREEN**
+- [ ] **Step 2: Review the human-facing documentation**
 
-Run the same focused command. Expected: PASS.
+Read both rendered documents and verify every required section is present, all binary links use the exact fork release URL, the upstream release URL is absent, and the video-generation boundary is explicit. Human prose is not protected with source-text regression tests.
 
-- [ ] **Step 5: Commit the documentation**
+- [ ] **Step 3: Commit the documentation**
 
 ```powershell
 git add README.md source/local-service/packaging/使用说明.txt source/local-service/test/api.test.js
@@ -91,19 +66,24 @@ git commit -m "docs: publish linli user guide"
 
 **Interfaces:**
 - Build command: `build-release.ps1 -OutputDirectory <I-drive path>`.
+- Diagnostic command: `build-release.ps1 -OutputDirectory <I-drive path> -ResolvePathsOnly` outputs one JSON object without compiling or downloading.
+- Checksum command: `build-release.ps1 -OutputDirectory <I-drive path> -ChecksumOnly` hashes existing setup and portable assets.
 - Produces: installer, portable ZIP, `使用说明.txt`, and `SHA256SUMS.txt` in the chosen output directory.
 
-- [ ] **Step 1: Add failing build-contract assertions**
+- [ ] **Step 1: Add failing executable build-contract tests**
 
-Assert the build script defines repository-local writable paths and emits checksums:
+Create I-drive temporary directories. Execute the real PowerShell script in both diagnostic modes and assert observable output:
 
 ```js
-assert.match(buildScript, /Join-Path \$project "dist-native\\build-tools"/u);
-assert.match(buildScript, /\$env:DOTNET_CLI_HOME/u);
-assert.match(buildScript, /\$env:NUGET_PACKAGES/u);
-assert.doesNotMatch(buildScript, /Join-Path \$env:LOCALAPPDATA "OliviaSoulBuildTools\\downloads"/u);
-assert.match(buildScript, /SHA256SUMS\.txt/u);
-assert.match(buildScript, /Get-FileHash -LiteralPath \$artifact -Algorithm SHA256/u);
+const resolved = JSON.parse(paths.stdout);
+assert.match(resolved.buildTools, /^I:[\\/]/u);
+assert.equal(resolved.buildTools, join(project, "dist-native", "build-tools"));
+assert.equal(resolved.outputDirectory, output);
+assert.equal(await readFile(join(output, "SHA256SUMS.txt"), "utf8"), [
+  "8FB6D5F37E8055CE720BD0B1D56587F88C0071F285966BA17E72B2B12672AA73  OliviaSoul-2008.2.7-Setup.exe",
+  "01E782826AE5182220BD6158F883D01CEB1BCE659DC020E7C511F802A9AA7737  OliviaSoul-2008.2.7-Portable.zip",
+  "",
+].join("\n"));
 ```
 
 - [ ] **Step 2: Run focused test and confirm RED**
@@ -111,23 +91,24 @@ assert.match(buildScript, /Get-FileHash -LiteralPath \$artifact -Algorithm SHA25
 Run:
 
 ```powershell
-node --test --test-name-pattern="v18 发布配置" test/api.test.js
+node --test --test-name-pattern="发布构建路径与校验和" test/api.test.js
 ```
 
-Expected: FAIL because downloads currently target `%LOCALAPPDATA%` and checksums are manual.
+Expected: FAIL because `-ResolvePathsOnly` and `-ChecksumOnly` do not exist.
 
 - [ ] **Step 3: Implement repository-local build tooling and checksum output**
 
 In `build-release.ps1`:
 
 ```powershell
+param([switch]$ResolvePathsOnly, [switch]$ChecksumOnly)
 $buildTools = Join-Path $project "dist-native\build-tools"
 $downloadCache = Join-Path $buildTools "downloads"
 $env:DOTNET_CLI_HOME = Join-Path $buildTools "dotnet-home"
 $env:NUGET_PACKAGES = Join-Path $buildTools "nuget-packages"
 ```
 
-Use `$buildTools\dotnet\dotnet.exe` as the optional bundled SDK location. After Inno Setup succeeds, hash the setup executable and portable ZIP in that order and write UTF-8 without BOM:
+Return the resolved paths as JSON and exit when `-ResolvePathsOnly` is supplied. Use `$buildTools\dotnet\dotnet.exe` as the optional bundled SDK location. Put checksum creation in one function used by both the normal successful build and `-ChecksumOnly`; hash the setup executable and portable ZIP in that order and write UTF-8 without BOM:
 
 ```powershell
 $artifacts = @(
@@ -151,7 +132,7 @@ $checksumLines = foreach ($artifact in $artifacts) {
 Run:
 
 ```powershell
-node --test --test-name-pattern="v18 发布配置" test/api.test.js
+node --test --test-name-pattern="发布构建路径与校验和" test/api.test.js
 npm test
 ```
 
