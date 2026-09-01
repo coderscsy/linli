@@ -142,21 +142,31 @@ I:\OliviaSoulLocal\BSide\
 
 本地发信限制改成配置项：默认无限制，也可由用户设置每日上限。管理页继续提供手动重置。
 
-#### 5.4 Gemma provider
+#### 5.4 DeepSeek / 本地 Gemma 手动切换
 
-新增通用 OpenAI Chat Completions provider：
+模型层保留两套彼此独立的 OpenAI Chat Completions 配置，并持久化当前选择：
 
-- 配置 `baseUrl`、`model` 和可选鉴权；
-- 本地无鉴权服务允许空密钥或显式 `authMode=none`；
-- Gemma 模式不发送 DeepSeek 专属 `thinking` 和 `reasoning_effort` 字段；
-- 密钥只保存在本地配置，不写日志、导出包或游戏前端；
-- 启动时先做模型兼容性检查，失败时保留来信为待处理，不生成伪回信。
+- `activeProvider=deepseek|local`，只允许用户在管理页手动切换；
+- DeepSeek 配置继续兼容现有 `deepseek.env`，默认使用 `https://api.deepseek.com`、`deepseek-v4-pro` 和 Bearer API Key；
+- 本地配置默认使用 `https://m4.tailf0d018.ts.net/v1`、`gemma-4-26b-a4b-it-ultra-uncensored-heretic` 和 `authMode=none`；
+- 两套配置分别保存 `baseUrl`、`model`、`authMode` 和 `apiKey`，切换时不得覆盖未选中的配置；
+- 本地服务允许空密钥；若用户明确选择 Bearer，则必须填写密钥；
+- 本地 Gemma 请求不发送 DeepSeek 专属 `thinking` 和 `reasoning_effort` 字段；
+- 写信回信、逐封摘要、旧信合集、AI 导入和转写整理统一读取同一个 `activeProvider`，不得各自漂移；
+- 当前接口失败时明确报告当前 provider、地址和安全处理后的错误，不自动回退到另一接口，也不重试另一个模型；
+- 两套连通性测试互相独立，测试或保存一套配置不得改变当前 provider，只有显式“设为当前”才切换；
+- 密钥只保存在 `.cursor/secrets` 下的本地配置，不写日志、导出包或游戏前端；
+- 启动时检查当前模型兼容性，失败时保留来信为待处理，不生成伪回信。
+
+配置迁移采用兼容读取：首次加载新配置时投影现有 `DEEPSEEK_*` 值，但不删除或重写旧 `deepseek.env`。新配置同时保存 DeepSeek 和本地两套档案，以便离线服务升级、回滚和再次切换。
 
 数据流：
 
 ```text
-游戏写信 → local-service/SQLite → Gemma → 文字回信
-                                      └→ 记忆摘要
+管理页手动选择 DeepSeek / 本地 Gemma
+                    ↓
+游戏写信 → local-service/SQLite → 当前 provider → 文字回信
+                                               └→ 记忆摘要、AI 导入和转写整理
 已有关联 MP4 → reply_type=2 → 游戏内视频回信播放器
 ```
 
@@ -263,7 +273,7 @@ MIDI 通常只有音符和控制信息，不包含人声、歌词、合法角色
 
 1. 检查 I 盘目录和关键文件哈希；
 2. 启动只监听 `127.0.0.1` 的 local-service；
-3. 检查 Gemma provider；
+3. 检查当前手动选择的 DeepSeek 或本地 Gemma provider；
 4. 启动独立游戏副本；
 5. 退出时停止本次启动的本地服务，不结束其他 Node 进程。
 
@@ -299,7 +309,8 @@ MIDI 通常只有音符和控制信息，不包含人声、歌词、合法角色
 - 独立副本能够合法启动，Z 盘原版仍能启动；
 - 游戏内可见信箱、写信入口和历史回信；
 - 连续发送超过 3 封本地信件不被官方日限额阻断；
-- Gemma 成功生成文字回信，失败可重试；
+- DeepSeek 与本地 Gemma 均可独立保存和测试，手动切换后配置互不覆盖；
+- 本地 Gemma 成功生成文字回信，当前接口失败时不自动调用 DeepSeek；
 - 手动附加 MP4 后，游戏内以视频回信播放且支持 Range；
 - 游戏内显示轻音乐 13、古典 48、ACG 68，总计 129 首；
 - 13 首轻音乐均能从本地资源打开，断网时不访问官方资源域名；
@@ -325,7 +336,7 @@ MIDI 通常只有音符和控制信息，不包含人声、歌词、合法角色
 
 本设计不作为一个巨型实现任务执行，而拆成三个独立 spec/plan：
 
-1. **Local Companion Restore**：I 盘副本、启动验证、离线前端、Gemma、信件、现有视频回信和 129 首本地曲库；
+1. **Local Companion Restore**：I 盘副本、启动验证、离线前端、DeepSeek/本地 Gemma 手动切换、信件、现有视频回信和 129 首本地曲库；
 2. **Local MIDI Jobs**：MIDI 上传、解析、任务协议、存储和旧 UI 兼容；
 3. **Renderer Integration**：TPRender 合法恢复与协议，或通用钢琴适配器。
 
