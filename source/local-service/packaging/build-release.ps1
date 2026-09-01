@@ -1,7 +1,9 @@
 ﻿param(
     [string]$OutputDirectory = "",
     [string]$DotNet = "",
-    [string]$Iscc = ""
+    [string]$Iscc = "",
+    [switch]$ResolvePathsOnly,
+    [switch]$ChecksumOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,10 +32,25 @@ foreach ($token in @(
 )) {
     if (-not $nativeProjectText.Contains($token)) { throw "原生程序版本必须固定为林离生日 $version" }
 }
-Write-Output "Olivia Soul version: $version (fixed)"
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $repository "build" }
+$buildTools = Join-Path $project "dist-native\build-tools"
+$downloadCache = Join-Path $buildTools "downloads"
+$env:DOTNET_CLI_HOME = Join-Path $buildTools "dotnet-home"
+$env:NUGET_PACKAGES = Join-Path $buildTools "nuget-packages"
+
+if ($ResolvePathsOnly) {
+    [pscustomobject]@{
+        buildTools = [IO.Path]::GetFullPath($buildTools)
+        downloadCache = [IO.Path]::GetFullPath($downloadCache)
+        dotnetCliHome = [IO.Path]::GetFullPath($env:DOTNET_CLI_HOME)
+        nugetPackages = [IO.Path]::GetFullPath($env:NUGET_PACKAGES)
+        outputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+    } | ConvertTo-Json -Compress
+    exit 0
+}
+
+Write-Output "Olivia Soul version: $version (fixed)"
 $stage = Join-Path $project "dist-native\stage"
-$downloadCache = Join-Path $env:LOCALAPPDATA "OliviaSoulBuildTools\downloads"
 $nodeVersion = "22.22.0"
 $nodeArchiveName = "node-v$nodeVersion-win-x64.zip"
 $nodeArchive = Join-Path $downloadCache $nodeArchiveName
@@ -77,6 +94,19 @@ function Copy-PublicFile([string]$Source, [string]$Destination) {
     }
 }
 
+function Get-Sha256Hash([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha256.ComputeHash($stream)
+        return ([BitConverter]::ToString($bytes)).Replace("-", "")
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Download-PinnedFile([string]$Url, [string]$Path) {
     $urls = @($Url, "https://ghfast.top/$Url", "https://gh-proxy.com/$Url")
     foreach ($candidate in $urls) {
@@ -90,10 +120,36 @@ function Download-PinnedFile([string]$Url, [string]$Path) {
     throw "固定依赖下载失败：$Url"
 }
 
+function Write-ReleaseChecksums([string]$Directory) {
+    $artifacts = @(
+        (Join-Path $Directory "OliviaSoul-$version-Setup.exe"),
+        (Join-Path $Directory "OliviaSoul-$version-Portable.zip")
+    )
+    $lines = foreach ($artifact in $artifacts) {
+        if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "缺少发布文件：$artifact"
+        }
+        $hash = Get-Sha256Hash $artifact
+        "$hash  $([IO.Path]::GetFileName($artifact))"
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $Directory "SHA256SUMS.txt"),
+        (($lines -join "`n") + "`n"),
+        $utf8NoBom
+    )
+}
+
+if ($ChecksumOnly) {
+    Write-ReleaseChecksums $OutputDirectory
+    exit 0
+}
+
 Ensure-Directory $downloadCache
+Ensure-Directory $env:DOTNET_CLI_HOME
+Ensure-Directory $env:NUGET_PACKAGES
 
 if ([string]::IsNullOrWhiteSpace($DotNet)) {
-    $localDotNet = Join-Path $env:LOCALAPPDATA "OliviaSoulBuildTools\dotnet\dotnet.exe"
+    $localDotNet = Join-Path $buildTools "dotnet\dotnet.exe"
     if (Test-Path -LiteralPath $localDotNet) { $DotNet = $localDotNet }
     else { $DotNet = (Get-Command dotnet.exe -ErrorAction Stop).Source }
 }
@@ -120,7 +176,7 @@ if (-not (Test-Path -LiteralPath $nodeChecksums)) {
 $checksumLine = Get-Content -LiteralPath $nodeChecksums | Where-Object { $_ -match [regex]::Escape($nodeArchiveName) + '$' } | Select-Object -First 1
 if (-not $checksumLine) { throw "未找到 Node.js 官方校验值" }
 $expectedHash = ($checksumLine -split '\s+')[0].ToLowerInvariant()
-$actualHash = (Get-FileHash -LiteralPath $nodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+$actualHash = (Get-Sha256Hash $nodeArchive).ToLowerInvariant()
 if ($actualHash -ne $expectedHash) { throw "Node.js 下载包 SHA-256 校验失败" }
 
 if (-not (Test-Path -LiteralPath $webViewBootstrapper)) {
@@ -129,13 +185,13 @@ if (-not (Test-Path -LiteralPath $webViewBootstrapper)) {
 if (-not (Test-Path -LiteralPath $whisperArchive)) {
     Download-PinnedFile $whisperUrl $whisperArchive
 }
-if ((Get-FileHash -LiteralPath $whisperArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $whisperSha256) {
+if ((Get-Sha256Hash $whisperArchive).ToLowerInvariant() -ne $whisperSha256) {
     throw "whisper.cpp 下载包 SHA-256 校验失败"
 }
 if (-not (Test-Path -LiteralPath $whisperModel)) {
     $installedModel = Join-Path $env:APPDATA "OliviaSoul\models\whisper\ggml-small.bin"
     if ((Test-Path -LiteralPath $installedModel) -and
-        (Get-FileHash -LiteralPath $installedModel -Algorithm SHA256).Hash.ToLowerInvariant() -eq $whisperModelSha256) {
+        (Get-Sha256Hash $installedModel).ToLowerInvariant() -eq $whisperModelSha256) {
         Copy-Item -LiteralPath $installedModel -Destination $whisperModel
     }
     else {
@@ -151,13 +207,13 @@ if (-not (Test-Path -LiteralPath $whisperModel)) {
     }
 }
 if (-not (Test-Path -LiteralPath $whisperModel) -or
-    (Get-FileHash -LiteralPath $whisperModel -Algorithm SHA256).Hash.ToLowerInvariant() -ne $whisperModelSha256) {
+    (Get-Sha256Hash $whisperModel).ToLowerInvariant() -ne $whisperModelSha256) {
     throw "Whisper 模型 SHA-256 校验失败"
 }
 if (-not (Test-Path -LiteralPath $ffmpegArchive)) {
     Download-PinnedFile $ffmpegUrl $ffmpegArchive
 }
-$ffmpegActualHash = (Get-FileHash -LiteralPath $ffmpegArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+$ffmpegActualHash = (Get-Sha256Hash $ffmpegArchive).ToLowerInvariant()
 if ($ffmpegActualHash -ne $ffmpegSha256) { throw "FFmpeg 下载包 SHA-256 校验失败" }
 
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -242,4 +298,5 @@ $env:OLIVIA_SOUL_OUTPUT = $OutputDirectory
 & $Iscc (Join-Path $PSScriptRoot "OliviaSoul.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup 打包失败" }
 
+Write-ReleaseChecksums $OutputDirectory
 Write-Output "Olivia Soul release: $OutputDirectory"

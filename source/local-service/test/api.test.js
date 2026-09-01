@@ -495,6 +495,50 @@ test("本地服务提供加播单、查播单和删播单接口", async () => {
   }
 });
 
+test("发布构建路径留在 I 盘", async () => {
+  await mkdir("I:\\Temp", { recursive: true });
+  const root = await mkdtemp("I:\\Temp\\olivia-build-paths-");
+  try {
+    const output = join(root, "release");
+    const buildScript = new URL("../packaging/build-release.ps1", import.meta.url).pathname.slice(1);
+    const project = new URL("../", import.meta.url).pathname.slice(1).replace(/[\\/]$/u, "");
+    const result = await execFileAsync("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", buildScript,
+      "-OutputDirectory", output, "-ResolvePathsOnly",
+    ]);
+    const resolved = JSON.parse(result.stdout);
+    assert.match(resolved.buildTools, /^I:[\\/]/u);
+    assert.equal(resolved.buildTools, join(project, "dist-native", "build-tools"));
+    assert.equal(resolved.downloadCache, join(project, "dist-native", "build-tools", "downloads"));
+    assert.equal(resolved.dotnetCliHome, join(project, "dist-native", "build-tools", "dotnet-home"));
+    assert.equal(resolved.nugetPackages, join(project, "dist-native", "build-tools", "nuget-packages"));
+    assert.equal(resolved.outputDirectory, output);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("发布脚本为现有二进制生成校验和", async () => {
+  await mkdir("I:\\Temp", { recursive: true });
+  const root = await mkdtemp("I:\\Temp\\olivia-build-hashes-");
+  try {
+    await writeFile(join(root, "OliviaSoul-2008.2.7-Setup.exe"), "setup");
+    await writeFile(join(root, "OliviaSoul-2008.2.7-Portable.zip"), "portable");
+    const buildScript = new URL("../packaging/build-release.ps1", import.meta.url).pathname.slice(1);
+    await execFileAsync("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", buildScript,
+      "-OutputDirectory", root, "-ChecksumOnly",
+    ]);
+    assert.equal(await readFile(join(root, "SHA256SUMS.txt"), "utf8"), [
+      "8FB6D5F37E8055CE720BD0B1D56587F88C0071F285966BA17E72B2B12672AA73  OliviaSoul-2008.2.7-Setup.exe",
+      "01E782826AE5182220BD6158F883D01CEB1BCE659DC020E7C511F802A9AA7737  OliviaSoul-2008.2.7-Portable.zip",
+      "",
+    ].join("\n"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("v18 发布配置只同步当前 Harness 文件并清理旧文件", async () => {
   const [harnessScript, retrievalScript, liveScript, precheck, stateInitializer, historyPrompt, buildScript, nodeHost, desktopMain, installer, server] = await Promise.all([
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/harness-4step.ps1", import.meta.url), "utf8"),
