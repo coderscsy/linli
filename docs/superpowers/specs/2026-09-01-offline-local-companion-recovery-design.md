@@ -148,7 +148,7 @@ I:\OliviaSoulLocal\BSide\
 
 - `activeProvider=deepseek|local`，只允许用户在管理页手动切换；
 - DeepSeek 配置继续兼容现有 `deepseek.env`，默认使用 `https://api.deepseek.com`、`deepseek-v4-pro` 和 Bearer API Key；
-- 本地配置默认使用 `https://m4.tailf0d018.ts.net/v1`、`gemma-4-26b-a4b-it-ultra-uncensored-heretic` 和 `authMode=none`；
+- 本地配置示例使用 `http://127.0.0.1:8000/v1`、`your-local-model` 和 `authMode=none`；
 - 两套配置分别保存 `baseUrl`、`model`、`authMode` 和 `apiKey`，切换时不得覆盖未选中的配置；
 - 本地服务允许空密钥；若用户明确选择 Bearer，则必须填写密钥；
 - 本地 Gemma 请求不发送 DeepSeek 专属 `thinking` 和 `reasoning_effort` 字段；

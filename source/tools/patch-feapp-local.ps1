@@ -33,7 +33,7 @@ if ($mainFiles.Count -ne 1) { throw "expected one main-*.js, got $($mainFiles.Co
 $utf8 = New-Object System.Text.UTF8Encoding $false
 $mainPath = $mainFiles[0].FullName
 $text = [IO.File]::ReadAllText($mainPath, $utf8)
-$patchMarker = '/*OliviaSoulPatch:mail-music-v11*/'
+$patchMarker = '/*OliviaSoulPatch:mail-music-v13*/'
 if ($text.Contains($patchMarker)) { throw "original feapp already contains current patch" }
 $text = $patchMarker + $text
 $endpoints = @(
@@ -111,6 +111,24 @@ $musicFeaturesEnabled = 'N3=!0,Ss=!0,wa=({onComplete'
 $musicFeaturesCount = ([regex]::Matches($text, [regex]::Escape($musicFeaturesDisabled))).Count
 if ($musicFeaturesCount -ne 1) { throw "expected one disabled music feature gate, got $musicFeaturesCount" }
 $text = $text.Replace($musicFeaturesDisabled, $musicFeaturesEnabled)
+
+$midiCardOfflineHidden = '!o(w)&&o(Ss)?(r(),F(Be,'
+$midiCardOfflineShown = 'o(Ss)?(r(),F(Be,'
+$midiCardOfflineCount = ([regex]::Matches($text, [regex]::Escape($midiCardOfflineHidden))).Count
+if ($midiCardOfflineCount -ne 1) { throw "expected one offline custom performance hide, got $midiCardOfflineCount" }
+$text = $text.Replace($midiCardOfflineHidden, $midiCardOfflineShown)
+
+$offlineStylesFiltered = 'D.value=oe.musicStyles.filter(me=>oe.getSongsByStyle(me.type).some(Be=>f.isDownloaded(Be.id)))'
+$offlineStylesShown = 'D.value=oe.musicStyles'
+$offlineStylesCount = ([regex]::Matches($text, [regex]::Escape($offlineStylesFiltered))).Count
+if ($offlineStylesCount -ne 1) { throw "expected one offline music style filter, got $offlineStylesCount" }
+$text = $text.Replace($offlineStylesFiltered, $offlineStylesShown)
+
+$interfaceWatermarkShown = 'o(T)?(r(),F(ye,{key:0,uid:o(T)},null,8,["uid"])):Y("",!0)'
+$interfaceWatermarkHidden = 'Y("",!0)'
+$interfaceWatermarkCount = ([regex]::Matches($text, [regex]::Escape($interfaceWatermarkShown))).Count
+if ($interfaceWatermarkCount -ne 1) { throw "expected one interface uid watermark render, got $interfaceWatermarkCount" }
+$text = $text.Replace($interfaceWatermarkShown, $interfaceWatermarkHidden)
 
 $playlistHidden = 'o(w)?Y("",!0):(r(),_(se,{key:0},[o(a)?(r(),_("div",c4,'
 $playlistShown = '(r(),_(se,{key:0},[o(a)?(r(),_("div",c4,'
@@ -229,6 +247,11 @@ foreach ($endpoint in $endpoints) {
 if (-not $verifyText.StartsWith($patchMarker)) { throw "patched archive missing revision marker" }
 if (-not $verifyText.Contains($offlineWidgetsEnabled)) { throw "patched archive still disables offline desktop widgets" }
 if (-not $verifyText.Contains($musicFeaturesEnabled)) { throw "patched archive still has mailbox or music features disabled" }
+if (-not $verifyText.Contains($midiCardOfflineShown)) { throw "patched archive still hides custom performance offline" }
+if ($verifyText.Contains($midiCardOfflineHidden)) { throw "patched archive still has the original custom performance hide" }
+if (-not $verifyText.Contains($offlineStylesShown)) { throw "patched archive still filters offline music styles" }
+if ($verifyText.Contains($offlineStylesFiltered)) { throw "patched archive still has the original offline music style filter" }
+if ($verifyText.Contains($interfaceWatermarkShown)) { throw "patched archive still renders the interface uid watermark" }
 if (-not $verifyText.Contains($playlistShown)) { throw "patched archive still hides the offline playlist" }
 if (-not $verifyText.Contains($hideActionsTo)) { throw "patched archive still hides offline song actions" }
 if (-not $verifyText.Contains($offlineRequestAllow)) { throw "patched archive still blocks offline HTTP requests" }

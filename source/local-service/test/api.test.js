@@ -36,6 +36,7 @@ async function fixture(options = {}) {
     readOfficialRequestContext: options.readOfficialRequestContext,
     remoteBase: options.remoteBase,
     worker: options.worker ?? false,
+    dailyLetterLimit: Object.hasOwn(options, "dailyLetterLimit") ? options.dailyLetterLimit : 3,
   });
   const address = await service.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
@@ -402,6 +403,12 @@ test("挂载补丁会恢复离线信件、音乐入口和音乐功能", async ()
   assert.match(patchScript, /videoByTodView:e\.videoByTodView\?\?i\.videoByTodView/u);
   assert.match(patchScript, /if\(w\.value\)\{await W\(\)\.finally/u);
   assert.match(patchScript, /patched archive still skips offline playlist fetch/u);
+  assert.match(patchScript, /\$midiCardOfflineShown = 'o\(Ss\)\?\(r\(\),F\(Be,/u);
+  assert.match(patchScript, /patched archive still hides custom performance offline/u);
+  assert.match(patchScript, /\$offlineStylesShown = 'D\.value=oe\.musicStyles'/u);
+  assert.match(patchScript, /patched archive still filters offline music styles/u);
+  assert.match(patchScript, /\$interfaceWatermarkHidden = 'Y\("",!0\)'/u);
+  assert.match(patchScript, /patched archive still renders the interface uid watermark/u);
   assert.match(patchScript, /NutStudioUI\.dll/u);
   assert.match(patchScript, /NutContainerPlugin\.dll/u);
   assert.match(patchScript, /lite-bar offline check/u);
@@ -1321,6 +1328,41 @@ test("每天按本地自然日最多发送三封", async t => {
   });
   assert.equal(rejected.status, 200);
   assert.notEqual(rejected.body.code, 0);
+});
+
+test("每日写信上限默认不限且可在调试页手动修改", async t => {
+  const ctx = await fixture({ dailyLetterLimit: undefined });
+  t.after(() => ctx.close());
+  await signIn(ctx);
+
+  const initial = await ctx.request("/admin/api/debug");
+  assert.equal(initial.body.data.dailyLetterLimit, 0);
+  assert.equal(initial.body.data.remainingToday, null);
+  for (let index = 0; index < 4; index++) {
+    const sent = await ctx.request("/toy/letter/send", {
+      method: "POST",
+      body: JSON.stringify({ content: `不限次数 ${index + 1}` }),
+    });
+    assert.equal(sent.body.code, 0);
+    assert.equal(sent.body.data.remainingToday, null);
+  }
+
+  const limited = await ctx.request("/admin/api/debug/quota/limit", {
+    method: "POST",
+    body: JSON.stringify({ limit: 3 }),
+  });
+  assert.equal(limited.body.data.dailyLetterLimit, 3);
+  assert.equal(limited.body.data.remainingToday, 0);
+  const reset = await ctx.request("/admin/api/debug/quota/reset", { method: "POST", body: "{}" });
+  assert.equal(reset.body.data.remainingToday, 3);
+
+  const invalid = await ctx.request("/admin/api/debug/quota/limit", {
+    method: "POST",
+    body: JSON.stringify({ limit: 1000 }),
+  });
+  assert.equal(invalid.status, 400);
+  const afterInvalid = await ctx.request("/admin/api/debug");
+  assert.equal(afterInvalid.body.data.dailyLetterLimit, 3);
 });
 
 test("连续发出的第二封信也会生成并进入记忆库", async t => {
@@ -2866,7 +2908,8 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.match(html, />视频转文字</u);
   assert.doesNotMatch(html, />远端记忆</u);
   assert.doesNotMatch(html, /data-memory-tab="remote"/u);
-  assert.doesNotMatch(html, /data-tab="debug"/u);
+  assert.match(html, /data-tab="debug"/u);
+  assert.match(html, />高级设置</u);
     assert.match(html, /id="transcriptionModelProgress"/u);
     assert.match(html, /id="remoteMemoryModelProgress"/u);
     assert.doesNotMatch(html, /标准记忆 JSON/u);
@@ -2895,8 +2938,8 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.doesNotMatch(patch, /\$listWaitingCondition|\$listWaitingReply|\$waitingCondition/u);
   assert.match(patch, /\$pollingStateTo/u);
   assert.match(patch, /\$processingIconTo/u);
-  assert.match(patch, /OliviaSoulPatch:mail-music-v11/u);
-  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v11/u);
+  assert.match(patch, /OliviaSoulPatch:mail-music-v13/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v13/u);
   assert.match(patch, /s\.isOfflineMode\?uo\(\)\.startPolling\(\)/u);
   assert.match(patch, /Ie\(\)\.isOfflineMode\|\|J\(\)/u);
   assert.match(patch, /ds\(\{pageSize:S\},\{hideToast:!0\}\)/u);

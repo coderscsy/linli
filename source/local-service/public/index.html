@@ -26,6 +26,7 @@
           <button class="sideTab active" type="button" data-tab="settings">基础设置</button>
           <button class="sideTab" type="button" data-tab="memory">记忆</button>
           <button class="sideTab" type="button" data-tab="transcription">视频转文字</button>
+          <button class="sideTab" type="button" data-tab="debug">高级设置</button>
         </nav>
       </aside>
 
@@ -118,7 +119,7 @@
                 </div>
                 <div>
                   <label for="localModelBaseUrl">地址</label>
-                  <input id="localModelBaseUrl" type="url" value="https://m4.tailf0d018.ts.net/v1" placeholder="https://m4.tailf0d018.ts.net/v1">
+                  <input id="localModelBaseUrl" type="url" value="http://127.0.0.1:8000/v1" placeholder="例如 http://127.0.0.1:8000/v1">
                 </div>
                 <div>
                   <label for="localAuthMode">鉴权方式</label>
@@ -332,7 +333,15 @@
                 <strong>今日信件次数</strong>
                 <small id="debugQuotaStatus">正在读取</small>
               </div>
-              <button id="resetTodayQuota" class="secondary" type="button">重置今天信件次数</button>
+              <div>
+                <label for="debugDailyLetterLimit">每日上限（0 表示不限）</label>
+                <input id="debugDailyLetterLimit" type="number" min="0" max="999" step="1">
+              </div>
+              <div class="actions">
+                <button id="saveDailyLetterLimit" class="secondary" type="button">保存上限</button>
+                <button id="resetTodayQuota" class="secondary" type="button">重置今天信件次数</button>
+                <span id="debugQuotaResult" class="result"></span>
+              </div>
             </section>
           </div>
         </section>

@@ -36,6 +36,9 @@ const JSON_HEADERS = {
 };
 const REPLY_DELAY_SECONDS = 300;
 const REPLY_DELAY_SETTING = "reply_delay_seconds_v2";
+const DAILY_LETTER_LIMIT_SETTING = "daily_letter_limit";
+const DEFAULT_DAILY_LETTER_LIMIT = 0;
+const MAX_DAILY_LETTER_LIMIT = 999;
 const GENERATION_TIMEOUT_MS = 60 * 60 * 1000;
 const MEMORY_EXPORT_SCHEMA = "olivia-soul.memory";
 const MEMORY_EXPORT_VERSION = 2;
@@ -410,6 +413,10 @@ function initDatabase(path) {
     ON CONFLICT(key) DO NOTHING
   `).run(REPLY_DELAY_SETTING, REPLY_DELAY_SECONDS);
   db.prepare(`
+    INSERT INTO settings(key, value) VALUES(?, ?)
+    ON CONFLICT(key) DO NOTHING
+  `).run(DAILY_LETTER_LIMIT_SETTING, DEFAULT_DAILY_LETTER_LIMIT);
+  db.prepare(`
     INSERT INTO settings(key, value) VALUES('offline_uid', '5200')
     ON CONFLICT(key) DO NOTHING
   `).run();
@@ -575,6 +582,7 @@ export async function createOliviaService(options = {}) {
   `).run(key, String(value));
   db.prepare("UPDATE settings SET value = 'pending' WHERE key LIKE 'memory_state:%' AND value IN ('running', 'paused')").run();
   if (options.delaySeconds !== undefined) setSetting(REPLY_DELAY_SETTING, options.delaySeconds);
+  if (options.dailyLetterLimit !== undefined) setSetting(DAILY_LETTER_LIMIT_SETTING, options.dailyLetterLimit);
   function initializeLocalUser() {
     const currentId = Number(getSetting("current_user_id"));
     let user = currentId ? db.prepare("SELECT * FROM users WHERE id = ?").get(currentId) : null;
@@ -660,12 +668,22 @@ export async function createOliviaService(options = {}) {
   }
   const sessionProvider = options.sessionProvider ?? fixedSessionProvider;
 
-  function remainingToday(userId, at = nowSeconds()) {
+  function letterQuota(userId, at = nowSeconds()) {
+    const limit = Number(getSetting(DAILY_LETTER_LIMIT_SETTING));
     const date = localDate(at);
     const resetRowId = Number(getSetting(`quota_reset:${userId}:${date}`) ?? 0);
     const rows = db.prepare("SELECT rowid, created_at FROM letters WHERE user_id = ? AND source = 'live' AND status != ? AND rowid > ?")
       .all(userId, STATUS.FAILED, resetRowId);
-    return Math.max(0, 3 - rows.filter(row => localDate(row.created_at) === date).length);
+    const used = rows.filter(row => localDate(row.created_at) === date).length;
+    return {
+      limit,
+      used,
+      remaining: limit === 0 ? null : Math.max(0, limit - used),
+    };
+  }
+
+  function remainingToday(userId, at = nowSeconds()) {
+    return letterQuota(userId, at).remaining;
   }
 
   function resetTodayQuota(userId, at = nowSeconds()) {
@@ -673,7 +691,7 @@ export async function createOliviaService(options = {}) {
     const rows = db.prepare("SELECT rowid, created_at FROM letters WHERE user_id = ? AND source = 'live'").all(userId);
     const latest = rows.filter(row => localDate(row.created_at) === date).reduce((max, row) => Math.max(max, row.rowid), 0);
     setSetting(`quota_reset:${userId}:${date}`, latest);
-    return remainingToday(userId, at);
+    return letterQuota(userId, at);
   }
 
   function getLocalUser() {
@@ -1771,7 +1789,9 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "POST" && path === "/toy/letter/send") {
       const user = getLocalUser();
-      if (!remainingToday(user.id)) throw httpError(429, "今天最多发送 3 封信", -10401);
+      const quota = letterQuota(user.id);
+      if (quota.limit > 0 && quota.remaining === 0)
+        throw httpError(429, `今天最多发送 ${quota.limit} 封信`, -10401);
       const body = await readJson(req);
       const content = String(body.content ?? "").trim();
       if (!content) throw httpError(400, "信件内容不能为空");
@@ -1785,7 +1805,8 @@ export async function createOliviaService(options = {}) {
       console.log(`[letter-send] id=${id} delay=${delay} memoryState=${getMemoryStatus(user.person).state} memoryJob=${memoryJobs.has(user.person)}`);
       triggerMemoryRefresh(user.person);
       wakeWorker();
-      return ok(req, res, { letterId: id, remainingToday: remainingToday(user.id) });
+      const nextQuota = letterQuota(user.id);
+      return ok(req, res, { letterId: id, dailyLimit: nextQuota.limit, remainingToday: nextQuota.remaining });
     }
 
     if (req.method === "GET" && path === "/toy/letter/list") {
@@ -1796,7 +1817,8 @@ export async function createOliviaService(options = {}) {
       const rows = db.prepare("SELECT * FROM letters WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?").all(user.id, pageSize + 1, cursor);
       const hasMore = rows.length > pageSize;
       const list = rows.slice(0, pageSize).map(row => visibleLetter(row, req));
-      return ok(req, res, { list, hasMore, nextCursor: hasMore ? cursor + pageSize : 0, total: Number(db.prepare("SELECT COUNT(*) count FROM letters WHERE user_id = ?").get(user.id).count), remainingToday: remainingToday(user.id) });
+      const quota = letterQuota(user.id);
+      return ok(req, res, { list, hasMore, nextCursor: hasMore ? cursor + pageSize : 0, total: Number(db.prepare("SELECT COUNT(*) count FROM letters WHERE user_id = ?").get(user.id).count), dailyLimit: quota.limit, remainingToday: quota.remaining });
     }
 
     const videoReadMatch = /^\/toy\/letter\/video\/([^/]+)$/u.exec(path);
@@ -1827,7 +1849,9 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "POST" && path === "/toy/letter/resend") {
       const user = getLocalUser();
-      if (!remainingToday(user.id)) throw httpError(429, "今天最多发送 3 封信", -10401);
+      const quota = letterQuota(user.id);
+      if (quota.limit > 0 && quota.remaining === 0)
+        throw httpError(429, `今天最多发送 ${quota.limit} 封信`, -10401);
       const body = await readJson(req);
       const letterId = body.letterId ?? body.letter_id;
       const row = db.prepare("SELECT * FROM letters WHERE id = ?").get(letterId);
@@ -2112,10 +2136,12 @@ export async function createOliviaService(options = {}) {
     if (req.method === "GET" && path === "/admin/api/debug") {
       const user = getLocalUser();
       const bulk = memoryBulk(user.id);
+      const quota = letterQuota(user.id);
       return ok(req, res, {
         delaySeconds: Number(getSetting(REPLY_DELAY_SETTING)),
         defaultDelaySeconds: REPLY_DELAY_SECONDS,
-        remainingToday: remainingToday(user.id),
+        dailyLetterLimit: quota.limit,
+        remainingToday: quota.remaining,
         bulkSummary: bulk?.summary ?? "",
       });
     }
@@ -2135,7 +2161,17 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "POST" && path === "/admin/api/debug/quota/reset") {
       const user = getLocalUser();
-      return ok(req, res, { remainingToday: resetTodayQuota(user.id) });
+      const quota = resetTodayQuota(user.id);
+      return ok(req, res, { dailyLetterLimit: quota.limit, remainingToday: quota.remaining });
+    }
+
+    if (req.method === "POST" && path === "/admin/api/debug/quota/limit") {
+      const limit = Number((await readJson(req)).limit);
+      if (!Number.isInteger(limit) || limit < 0 || limit > MAX_DAILY_LETTER_LIMIT)
+        throw httpError(400, `每日写信上限必须是 0–${MAX_DAILY_LETTER_LIMIT} 的整数，0 表示不限次数`);
+      setSetting(DAILY_LETTER_LIMIT_SETTING, limit);
+      const quota = letterQuota(getLocalUser().id);
+      return ok(req, res, { dailyLetterLimit: quota.limit, remainingToday: quota.remaining });
     }
 
     if (req.method === "GET" && path === "/admin/api/model") {

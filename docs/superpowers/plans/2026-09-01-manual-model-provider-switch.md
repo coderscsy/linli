@@ -16,7 +16,7 @@
 - Never call the unselected provider after a failure.
 - Preserve existing `deepseek.env` unchanged and import its values only as a compatibility source.
 - Default DeepSeek profile: `https://api.deepseek.com`, `deepseek-v4-pro`, `authMode=bearer`.
-- Default local profile: `https://m4.tailf0d018.ts.net/v1`, `gemma-4-26b-a4b-it-ultra-uncensored-heretic`, `authMode=none`.
+- Example local profile: `http://127.0.0.1:8000/v1`, `your-local-model`, `authMode=none`.
 - Do not log API keys, Authorization headers, letter bodies, or full model responses.
 - Keep the existing video-reply read/play/upload/Range path unchanged and covered by regression tests.
 
@@ -68,7 +68,7 @@ Assert local/no-auth emits no `Authorization`, `thinking`, or `reasoning_effort`
 
 ```js
 assert.equal(local.headers.Authorization, undefined);
-assert.equal(local.url, "https://m4.tailf0d018.ts.net/v1/chat/completions");
+assert.equal(local.url, "http://127.0.0.1:8000/v1/chat/completions");
 assert.equal(deepseek.headers.Authorization, "Bearer ds-key");
 assert.throws(() => buildChatRequest(badProfile, payload), /API Key/u);
 ```
@@ -211,7 +211,7 @@ Expected: provider-switch and existing MP4 upload/detail/Range tests PASS; the f
 
 - [ ] **Step 7: Perform a safe live local connectivity check and commit**
 
-Call `GET https://m4.tailf0d018.ts.net/v1/models`, verify HTTP 200 and the configured Gemma model ID, then use the local admin connectivity endpoint with a synthetic prompt only. Do not send archived letters or memory content.
+Call `GET http://127.0.0.1:8000/v1/models`, verify HTTP 200 and the configured local model ID, then use the local admin connectivity endpoint with a synthetic prompt only. Do not send archived letters or memory content.
 
 ```powershell
 git add source/.cursor/skills/fit-letters/scripts/model-call.ps1 source/.cursor/skills/fit-letters/scripts/ds-call.ps1 source/.cursor/skills/fit-letters/scripts/deepseek-reply.ps1 source/local-service/public/index.html source/local-service/public/app.js source/local-service/public/styles.css source/local-service/test/api.test.js

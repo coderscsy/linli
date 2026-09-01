@@ -60,7 +60,7 @@ function Import-ModelConfig {
     }
     else {
         $prefix = "MODEL_LOCAL"
-        $defaultBase = "https://m4.tailf0d018.ts.net/v1"
+        $defaultBase = "http://127.0.0.1:8000/v1"
         $defaultModel = "gemma-4-26b-a4b-it-ultra-uncensored-heretic"
         $defaultAuth = "none"
         $legacyBase = ""

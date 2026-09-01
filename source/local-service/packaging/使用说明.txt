@@ -13,7 +13,7 @@
 5. 保持本程序在后台运行，再进入游戏使用信箱、MIDI 和音乐入口。
 
 本地 Gemma 默认地址：
-https://m4.tailf0d018.ts.net/v1
+http://127.0.0.1:8000/v1
 
 默认模型：
 gemma-4-26b-a4b-it-ultra-uncensored-heretic

@@ -11,7 +11,7 @@ export const DEFAULT_DEEPSEEK_PROFILE = Object.freeze({
 
 export const DEFAULT_LOCAL_PROFILE = Object.freeze({
   provider: "local",
-  baseUrl: "https://m4.tailf0d018.ts.net/v1",
+  baseUrl: "http://127.0.0.1:8000/v1",
   model: "gemma-4-26b-a4b-it-ultra-uncensored-heretic",
   authMode: "none",
   apiKey: "",

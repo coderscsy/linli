@@ -427,7 +427,10 @@ async function loadDesktopSettings() {
 function renderDebug(data) {
   $("#debugDelay").value = data.delaySeconds;
   $("#debugDelayLabel").textContent = `回信最小延迟（${data.delaySeconds}秒）`;
-  $("#debugQuotaStatus").textContent = `今天还可发送 ${data.remainingToday} 封`;
+  $("#debugDailyLetterLimit").value = data.dailyLetterLimit;
+  $("#debugQuotaStatus").textContent = data.dailyLetterLimit === 0
+    ? "当前不限次数"
+    : `今天还可发送 ${data.remainingToday} 封（上限 ${data.dailyLetterLimit}）`;
   const show = $("#showSummaries").checked;
   $("#debugSummaries").hidden = !show;
   if (!show) return;
@@ -616,7 +619,16 @@ $("#defaultDebugDelay").addEventListener("click", safely(async () => {
 $("#resetTodayQuota").addEventListener("click", safely(async () => {
   if (!await confirmNotice("确认重置今天的信件次数？")) return;
   const result = await api("/admin/api/debug/quota/reset", { method: "POST", body: "{}" });
-  $("#debugQuotaStatus").textContent = `今天还可发送 ${result.remainingToday} 封`;
+  renderDebug({ ...(await api("/admin/api/debug")), ...result });
+  $("#debugQuotaResult").textContent = "今日计数已重置";
+}));
+$("#saveDailyLetterLimit").addEventListener("click", safely(async () => {
+  const result = await api("/admin/api/debug/quota/limit", {
+    method: "POST",
+    body: JSON.stringify({ limit: Number($("#debugDailyLetterLimit").value) }),
+  });
+  renderDebug({ ...(await api("/admin/api/debug")), ...result });
+  $("#debugQuotaResult").textContent = result.dailyLetterLimit === 0 ? "已设为不限次数" : "上限已保存";
 }));
 $("#selectClient").addEventListener("click", safely(async () => {
   const status = await window.oliviaDesktop.selectClient();

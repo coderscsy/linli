@@ -38,7 +38,7 @@ test("模型档案从旧 DeepSeek 配置迁移且两套配置互不覆盖", asyn
   });
   assert.deepEqual(before.profiles.local, {
     provider: "local",
-    baseUrl: "https://m4.tailf0d018.ts.net/v1",
+    baseUrl: "http://127.0.0.1:8000/v1",
     model: "gemma-4-26b-a4b-it-ultra-uncensored-heretic",
     authMode: "none",
     apiKey: "",
@@ -70,7 +70,7 @@ test("模型请求按当前档案构造且本地无鉴权不携带 DeepSeek 字�
   const messages = [{ role: "user", content: "只回复 OK" }];
   const local = buildChatRequest({
     provider: "local",
-    baseUrl: "https://m4.tailf0d018.ts.net/v1/",
+    baseUrl: "http://127.0.0.1:8000/v1/",
     model: "gemma-local",
     authMode: "none",
     apiKey: "",
@@ -81,7 +81,7 @@ test("模型请求按当前档案构造且本地无鉴权不携带 DeepSeek 字�
     thinking: { type: "disabled" },
     reasoning_effort: "low",
   });
-  assert.equal(local.url, "https://m4.tailf0d018.ts.net/v1/chat/completions");
+  assert.equal(local.url, "http://127.0.0.1:8000/v1/chat/completions");
   assert.deepEqual(local.headers, { "Content-Type": "application/json" });
   assert.deepEqual(local.body, {
     model: "gemma-local",
