@@ -14,7 +14,7 @@
 
 - [OliviaSoul-2008.2.7-Portable.zip](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.1/OliviaSoul-2008.2.7-Portable.zip)
 - [SHA256SUMS.txt](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.1/SHA256SUMS.txt)
-- [使用说明.txt](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.1/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.txt)
+- [中文使用说明](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.1/Linli-Guide-zh-CN.txt)
 
 > [!WARNING]
 > 不要把本工具安装或解压到游戏目录中。请使用独立目录，例如 `I:\OliviaSoul`。
