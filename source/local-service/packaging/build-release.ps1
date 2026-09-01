@@ -258,7 +258,10 @@ foreach ($name in @("server.js", "transcription.js", "remote-memory.js", "soul-b
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
 }
 Copy-PublicFile (Join-Path $project "package.json") (Join-Path $stage "app\package.json")
-Copy-Item -LiteralPath (Join-Path $project "node_modules") -Destination (Join-Path $stage "app\node_modules") -Recurse -Force
+$nodeModules = Join-Path $project "node_modules"
+if (Test-Path -LiteralPath $nodeModules) {
+    Copy-Item -LiteralPath $nodeModules -Destination (Join-Path $stage "app\node_modules") -Recurse -Force
+}
 Copy-Item -LiteralPath (Join-Path $project "public") -Destination (Join-Path $stage "app\public") -Recurse -Force
 foreach ($name in @("controller.js", "node-host.js", "startup-task.ps1")) {
     Copy-PublicFile (Join-Path $project "desktop\$name") (Join-Path $stage "app\desktop\$name")
