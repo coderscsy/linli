@@ -3,6 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { activeModelProfile, buildChatRequest } from "./model-config.js";
 
 const MODEL_NAME = "ggml-small.bin";
 const MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
@@ -107,11 +108,25 @@ async function runProcess(command, args, { signal, onOutput, onChild }) {
 }
 
 export class TranscriptionEngine {
-  constructor({ runtimeDir, modelsDir, tempDir, readDeepSeekConfig, fetchImpl = fetch, model }) {
+  constructor({ runtimeDir, modelsDir, tempDir, readModelConfig, readDeepSeekConfig, fetchImpl = fetch, model }) {
     this.runtimeDir = runtimeDir;
     this.modelsDir = modelsDir;
     this.tempDir = tempDir;
-    this.readDeepSeekConfig = readDeepSeekConfig;
+    this.readModelConfig = readModelConfig ?? (async () => {
+      const legacy = await readDeepSeekConfig();
+      return {
+        activeProvider: "deepseek",
+        profiles: {
+          deepseek: {
+            provider: "deepseek",
+            baseUrl: legacy.baseUrl,
+            model: legacy.model,
+            authMode: "bearer",
+            apiKey: legacy.apiKey,
+          },
+        },
+      };
+    });
     this.fetch = fetchImpl;
     this.model = model ?? { name: MODEL_NAME, urls: [MODEL_MIRROR_URL, MODEL_URL], sha256: MODEL_SHA256 };
     this.verifiedModel = false;
@@ -200,35 +215,32 @@ export class TranscriptionEngine {
   }
 
   async organize(rawText, signal, onChunk) {
-    const config = await this.readDeepSeekConfig();
-    if (!config.apiKey) throw new Error("请先在基础设置中填写 DeepSeek API Key");
+    const config = await this.readModelConfig();
+    const profile = activeModelProfile(config);
     const chunks = transcriptChunks(rawText);
     const organized = [];
     for (let index = 0; index < chunks.length; index++) {
       onChunk(index, chunks.length);
-      const response = await this.fetch(`${config.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
+      const call = buildChatRequest(profile, {
+        messages: [
+          {
+            role: "system",
+            content: "你是逐字稿整理员。只修正语音识别造成的错别字、同音字、标点和分段，删除无意义重复与语气噪声。不得概括、扩写、补造或改变说话人的意思。只输出整理后的正文。",
+          },
+          { role: "user", content: chunks[index] },
+        ],
+      });
+      call.body.stream = false;
+      const response = await this.fetch(call.url, {
         method: "POST",
-        headers: {
-          "Authorization": `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: config.model,
-          stream: false,
-          messages: [
-            {
-              role: "system",
-              content: "你是逐字稿整理员。只修正语音识别造成的错别字、同音字、标点和分段，删除无意义重复与语气噪声。不得概括、扩写、补造或改变说话人的意思。只输出整理后的正文。",
-            },
-            { role: "user", content: chunks[index] },
-          ],
-        }),
+        headers: call.headers,
+        body: JSON.stringify(call.body),
         signal,
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(`DeepSeek 整理失败：HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`${config.activeProvider} 整理失败：HTTP ${response.status}`);
       const content = body?.choices?.[0]?.message?.content?.trim();
-      if (!content) throw new Error("DeepSeek 未返回整理文字");
+      if (!content) throw new Error(`${config.activeProvider} 未返回整理文字`);
       organized.push(content);
     }
     return organized.join("\n\n");

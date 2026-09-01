@@ -1731,6 +1731,95 @@ test("OPTIONS 反射客户端来源并允许凭据", async t => {
   assert.equal(preflight.headers.get("access-control-allow-headers"), "x-rpc-device_fp,x-uid,x-token");
 });
 
+test("模型档案可独立保存测试并且只有手动激活才切换", async t => {
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  t.after(() => ctx.close());
+
+  const initial = await ctx.request("/admin/api/model");
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.data.activeProvider, "deepseek");
+  assert.equal(initial.body.data.profiles.local.model, "gemma-4-26b-a4b-it-ultra-uncensored-heretic");
+
+  const saved = await ctx.request("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://local.example/v1/",
+      model: "gemma-test",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.data.activeProvider, "deepseek");
+  assert.equal(saved.body.data.profiles.local.baseUrl, "https://local.example/v1");
+  assert.equal(saved.body.data.profiles.deepseek.baseUrl, "https://api.deepseek.com");
+
+  const tested = await ctx.request("/admin/api/model/test", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+  assert.equal(tested.status, 200);
+  assert.deepEqual(tested.body.data, { connected: true, provider: "local" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://local.example/v1/chat/completions");
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "deepseek");
+
+  const activated = await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+  assert.equal(activated.status, 200);
+  assert.equal(activated.body.data.activeProvider, "local");
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "local");
+});
+
+test("本地模型失败不回退 DeepSeek", async t => {
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return new Response("local unavailable", { status: 503 });
+    },
+  });
+  t.after(() => ctx.close());
+  await ctx.request("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://local.example/v1",
+      model: "gemma-test",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+  await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+
+  const result = await ctx.request("/admin/api/import/ai", {
+    method: "POST",
+    body: JSON.stringify({ content: "仅用于失败路由测试" }),
+  });
+  assert.equal(result.status, 502);
+  assert.match(result.body.message, /local/u);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://local.example/v1/chat/completions");
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.doesNotMatch(calls.map(call => call.url).join("\n"), /api\.deepseek\.com/u);
+});
+
 test("DeepSeek 设置支持默认配置、自定义配置与连通性测试", async t => {
   let requestedUrl;
   const ctx = await fixture({
@@ -2165,6 +2254,41 @@ test(".soul 本地文件只解析结构而不审查正文", async t => {
   const memory = await ctx.request("/admin/api/memory");
   assert.equal(memory.body.data.exchanges[0].incoming, incoming);
   assert.equal(memory.body.data.exchanges[0].reply, reply);
+});
+
+test("转写整理使用当前本地模型档案且不携带 Bearer", async () => {
+  const calls = [];
+  const engine = new TranscriptionEngine({
+    runtimeDir: "runtime",
+    modelsDir: "models",
+    tempDir: "tmp",
+    readModelConfig: async () => ({
+      activeProvider: "local",
+      profiles: {
+        local: {
+          provider: "local",
+          baseUrl: "https://local.example/v1",
+          model: "gemma-test",
+          authMode: "none",
+          apiKey: "",
+        },
+      },
+    }),
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "整理后的正文" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  const organized = await engine.organize("原始逐字稿", new AbortController().signal, () => {});
+  assert.equal(organized, "整理后的正文");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://local.example/v1/chat/completions");
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.equal(JSON.parse(calls[0].options.body).model, "gemma-test");
 });
 
 test("转写进度解析使用 FFmpeg 时间轴和 Whisper 百分比", () => {
