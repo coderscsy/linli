@@ -6,14 +6,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "process-control.ps1")
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $relative = "$Version\resources\feapp.dat"
 $source = Join-Path $GameRoot $relative
-$gamePrefix = [IO.Path]::GetFullPath($GameRoot).TrimEnd("\") + "\"
-Get-CimInstance Win32_Process |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($gamePrefix, [StringComparison]::OrdinalIgnoreCase) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Stop-GameProcesses $GameRoot
 Start-Sleep -Milliseconds 250
 if (-not (Test-Path -LiteralPath $OriginalFile)) {
     New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($OriginalFile)) -Force | Out-Null

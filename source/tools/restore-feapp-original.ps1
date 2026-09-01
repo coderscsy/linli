@@ -5,13 +5,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "process-control.ps1")
 $relative = "$Version\resources\feapp.dat"
 $destination = Join-Path $GameRoot $relative
 if (-not (Test-Path -LiteralPath $OriginalFile)) { throw "original feapp.dat not found" }
-$gamePrefix = [IO.Path]::GetFullPath($GameRoot).TrimEnd("\") + "\"
-Get-CimInstance Win32_Process |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($gamePrefix, [StringComparison]::OrdinalIgnoreCase) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Stop-GameProcesses $GameRoot
 Start-Sleep -Milliseconds 250
 Copy-Item -LiteralPath $OriginalFile -Destination $destination -Force
 $nutBasePath = Join-Path $GameRoot "$Version\NutBase.dll"

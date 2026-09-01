@@ -414,6 +414,17 @@ test("挂载补丁会恢复离线信件、音乐入口和音乐功能", async ()
   assert.match(patchScript, /patched archive still hides the write-letter entry/u);
 });
 
+test("游戏进程在停止前已退出时挂载流程继续", async () => {
+  const helper = new URL("../../tools/process-control.ps1", import.meta.url).pathname.slice(1);
+  const escapedHelper = helper.replaceAll("'", "''");
+  const { stdout } = await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-Command", `$ErrorActionPreference = 'Stop'; . '${escapedHelper}'; Stop-GameProcessById 2147483647; 'continued'`,
+  ]);
+  assert.equal(stdout.trim(), "continued");
+});
+
 test("本地服务提供加播单、查播单和删播单接口", async () => {
   const ctx = await fixture();
   try {
