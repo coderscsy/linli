@@ -53,7 +53,7 @@
 - Consumes: `-GameRoot`, `-CleanFeapp`, `-CatalogRoot`, `-DestinationRoot`.
 - Produces: `recovery/source-hashes.json`, `recovery/copy-hashes.json`, `recovery/install-state.json`, `recovery/feapp-original.dat`, and exit code 0 only after all hashes match.
 
-- [ ] **Step 1: Write the failing fixture test**
+- [x] **Step 1: Write the failing fixture test**
 
 Add a test that creates a tiny fake `0.0.9.627` client, invokes `new-independent-client.ps1`, and asserts that source/copy SHA-256 values match and all output paths are under the temporary destination. Add a second assertion that a destination on the same path as `-GameRoot` is rejected.
 
@@ -64,25 +64,25 @@ assert.equal(state.sourceManifestSha256, state.copyManifestSha256);
 await assert.rejects(runInstaller({ destinationRoot: gameRoot }), /独立目录/u);
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `node --test --test-name-pattern="独立客户端复制" test/api.test.js`
 
 Expected: FAIL because `new-independent-client.ps1` does not exist.
 
-- [ ] **Step 3: Implement the verified installer**
+- [x] **Step 3: Implement the verified installer**
 
 The script must resolve literal absolute paths, reject overlap, require the exact version layout, hash every source file before copying, copy with `Copy-Item -LiteralPath`, replace only the copied `feapp.dat` with `-CleanFeapp`, hash every destination file, and write JSON using UTF-8 without BOM. It must never remove an existing non-empty destination; a retry may continue only when `install-state.json` names the same sources and every existing file verifies.
 
-- [ ] **Step 4: Implement the read-only verifier and rerun the focused test**
+- [x] **Step 4: Implement the read-only verifier and rerun the focused test**
 
 `test-independent-client.ps1` must recalculate hashes and emit `{ valid, mismatches, version, catalogRoot }` as compact JSON. Run the focused test again and expect PASS.
 
-- [ ] **Step 5: Run the installer against the real inputs in manifest-only mode**
+- [x] **Step 5: Run the installer against the real inputs in manifest-only mode**
 
 Run with `-WhatIfManifestOnly` against the Z client, clean front end `C:\Users\sycan\AppData\Roaming\OliviaSoul\client-backups\daa132980f27b2fa84165d5f74f582eb.feapp.dat`, and the I backup catalog. Expect no writes outside a temporary I-drive test directory and record the two known front-end hashes in the test fixture.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add source/tools/new-independent-client.ps1 source/tools/test-independent-client.ps1 source/local-service/test/api.test.js

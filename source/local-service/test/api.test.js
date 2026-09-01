@@ -257,6 +257,112 @@ test("客户端原版备份按游戏版本隔离", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test("独立客户端复制后逐文件哈希一致且拒绝覆盖源目录", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-independent-client-test-"));
+  const gameRoot = join(root, "owned-game");
+  const versionRoot = join(gameRoot, "0.0.9.627");
+  const destinationRoot = join(root, "independent");
+  const wrongHashDestination = join(root, "wrong-hash");
+  const catalogRoot = join(root, "catalog");
+  const cleanFeapp = join(root, "clean-feapp.dat");
+  const script = new URL("../../tools/new-independent-client.ps1", import.meta.url).pathname.slice(1);
+  const verifier = new URL("../../tools/test-independent-client.ps1", import.meta.url).pathname.slice(1);
+  try {
+    await mkdir(join(versionRoot, "assets"), { recursive: true });
+    await mkdir(join(versionRoot, "resources"), { recursive: true });
+    await mkdir(catalogRoot, { recursive: true });
+    await writeFile(join(gameRoot, "Olivia.exe"), "owned executable");
+    await writeFile(join(versionRoot, "assets", "songlist.dat"), "song list");
+    await writeFile(join(versionRoot, "resources", "feapp.dat"), "mounted front end");
+    await writeFile(cleanFeapp, "clean front end");
+
+    await assert.rejects(execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", script,
+      "-GameRoot", gameRoot,
+      "-CleanFeapp", cleanFeapp,
+      "-CatalogRoot", catalogRoot,
+      "-DestinationRoot", wrongHashDestination,
+    ]), /front end hash/u);
+
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", script,
+      "-GameRoot", gameRoot,
+      "-CleanFeapp", cleanFeapp,
+      "-CatalogRoot", catalogRoot,
+      "-DestinationRoot", destinationRoot,
+      "-TestFixture",
+    ]);
+    const state = JSON.parse(stdout.trim());
+    assert.equal(state.version, "0.0.9.627");
+    assert.equal(state.filesVerified, 3);
+    assert.equal(state.sourceManifestSha256, state.copyManifestSha256);
+    assert.equal(await readFile(join(destinationRoot, "game", "0.0.9.627", "resources", "feapp.dat"), "utf8"), "clean front end");
+
+    const validResult = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", verifier,
+      "-DestinationRoot", destinationRoot,
+    ]);
+    assert.deepEqual(JSON.parse(validResult.stdout.trim()), {
+      valid: true,
+      mismatches: [],
+      version: "0.0.9.627",
+      catalogRoot,
+    });
+
+    const resumed = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", script,
+      "-GameRoot", gameRoot,
+      "-CleanFeapp", cleanFeapp,
+      "-CatalogRoot", catalogRoot,
+      "-DestinationRoot", destinationRoot,
+      "-TestFixture",
+    ]);
+    assert.equal(JSON.parse(resumed.stdout.trim()).resumed, true);
+
+    await writeFile(join(destinationRoot, "game", "0.0.9.627", "assets", "songlist.dat"), "tampered");
+    const invalidResult = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", verifier,
+      "-DestinationRoot", destinationRoot,
+    ]);
+    const invalid = JSON.parse(invalidResult.stdout.trim());
+    assert.equal(invalid.valid, false);
+    assert.deepEqual(invalid.mismatches, ["0.0.9.627/assets/songlist.dat"]);
+    await assert.rejects(execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", script,
+      "-GameRoot", gameRoot,
+      "-CleanFeapp", cleanFeapp,
+      "-CatalogRoot", catalogRoot,
+      "-DestinationRoot", destinationRoot,
+      "-TestFixture",
+    ]), /verification|mismatch/u);
+
+    await assert.rejects(execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", script,
+      "-GameRoot", gameRoot,
+      "-CleanFeapp", cleanFeapp,
+      "-CatalogRoot", catalogRoot,
+      "-DestinationRoot", gameRoot,
+      "-TestFixture",
+    ]), /独立目录/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("挂载补丁会开启硬编码信箱写信入口", async () => {
   const patchScript = await readFile(new URL("../../tools/patch-feapp-local.ps1", import.meta.url), "utf8");
   assert.match(patchScript, /\$mailboxDisabled = 'N3=!1,Ss=!1,wa=\(\{onComplete'/u);
