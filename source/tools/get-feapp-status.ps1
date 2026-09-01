@@ -36,7 +36,10 @@ $endpoints = @(
     "/letter/detail",
     "/letter/unread_count",
     "/letter/share",
-    "/letter/resend"
+    "/letter/resend",
+    "/addToPlaylist",
+    "/delFromPlaylist",
+    "/searchPlaylist"
 )
 $ports = New-Object System.Collections.Generic.List[int]
 $complete = $true
@@ -50,8 +53,10 @@ foreach ($endpoint in $endpoints) {
     $ports.Add([int]$matches[0].Groups[1].Value)
 }
 $uniquePorts = @($ports | Select-Object -Unique)
-$patchMarker = '/*OliviaSoulPatch:mail-cache-v3*/'
-$mounted = $complete -and $uniquePorts.Count -eq 1 -and $text.StartsWith($patchMarker)
+$patchMarkers = @(
+    '/*OliviaSoulPatch:mail-music-v11*/'
+)
+$mounted = $complete -and $uniquePorts.Count -eq 1 -and @($patchMarkers | Where-Object { $text.StartsWith($_) }).Count -eq 1
 $port = $null
 if ($mounted) { $port = $uniquePorts[0] }
 [ordered]@{ clientFound = $true; mounted = $mounted; port = $port } | ConvertTo-Json -Compress

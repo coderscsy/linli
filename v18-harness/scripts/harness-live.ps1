@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Person,
     [Parameter(Mandatory = $true)][string]$Letter,
     [Parameter(Mandatory = $true)][string]$OutFile,
+    [string]$HistoryFile = "",
     [string]$RulesFile = "",
     [string]$Root = ""
 )
@@ -46,7 +47,20 @@ try {
         $rulesName = (-join @([char]0x5199, [char]0x6CD5)) + ".md"
         $RulesFile = Join-Path (Join-Path $Root "harness") $rulesName
     }
-    & $harness -Person $Person -N $n -Root $Root -ArchivePath $temporaryArchive -OutFile $OutFile -RulesFile $RulesFile -Tag "live" -PreviousStateTag "live" -AllowStateBootstrap -Quiet
+    $invokeArgs = @{
+        Person = $Person
+        N = $n
+        Root = $Root
+        ArchivePath = $temporaryArchive
+        OutFile = $OutFile
+        RulesFile = $RulesFile
+        Tag = "live"
+        PreviousStateTag = "live"
+        AllowStateBootstrap = $true
+        Quiet = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($HistoryFile)) { $invokeArgs.HistoryFile = $HistoryFile }
+    & $harness @invokeArgs
     if (-not (Test-Path -LiteralPath $OutFile)) { throw "harness did not produce a reply" }
     $reply = (Read-Utf8 $OutFile).Trim()
     if ($reply.StartsWith("[BLOCKED]")) { throw "reply was blocked by the safety gate" }

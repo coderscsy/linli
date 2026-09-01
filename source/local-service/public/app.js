@@ -468,7 +468,7 @@ $("#cancelTranscription").addEventListener("click", safely(async () => {
     { method: "POST", body: "{}" },
   ));
 }));
-$("#startRemoteMemory").addEventListener("click", safely(async () => {
+$("#startRemoteMemory")?.addEventListener("click", safely(async () => {
   if (!await confirmNotice("远端记忆会覆盖当前记忆。是否继续？")) return;
   $("#startRemoteMemory").disabled = true;
   $("#cancelRemoteMemory").disabled = false;
@@ -492,7 +492,7 @@ $("#startRemoteMemory").addEventListener("click", safely(async () => {
     }
   }
 }));
-$("#cancelRemoteMemory").addEventListener("click", safely(async () => {
+$("#cancelRemoteMemory")?.addEventListener("click", safely(async () => {
   if (!remoteMemoryJobId) return;
   renderTaskProgress("remoteMemory", await api(
     `/admin/api/remote-memory/${encodeURIComponent(remoteMemoryJobId)}/cancel`,

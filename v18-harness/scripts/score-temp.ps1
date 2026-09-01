@@ -36,6 +36,7 @@ function Get-ArchiveExchanges {
             $her = [regex]::Replace($her, '(?s)\n---\s*\z', '')
             $her = [regex]::Replace($her, '(?m)^〔[^〕]*〕.*$', '')
             $her = [regex]::Replace($her, '(?s)\n> .*', '')
+            $her = [regex]::Replace($her, '(?s)\n##\s+(?:\d{4}-\d{2}-\d{2}|未注明日期)\s*\z', '')
             $her = $her.Trim()
         }
         $list += New-Object psobject -Property @{ N = $n; Him = $him; Her = $her }
