@@ -163,7 +163,7 @@ test("client status distinguishes partially mounted archives and an unselected c
   assert.equal(absent.webplayerMounted, false);
 });
 
-test("read-only status subprocesses time out without waiting indefinitely", { concurrency: false }, async t => {
+test("read-only status subprocesses stop after one timeout retry", { concurrency: false }, async t => {
   const original = childProcess.spawn;
   const process = new EventEmitter();
   process.stdout = new EventEmitter();
@@ -178,6 +178,8 @@ test("read-only status subprocesses time out without waiting indefinitely", { co
     pending = DesktopController.prototype.readFeappStatus.call(ctx.controller, ctx.layout.feappPath)
       .then(value => ({ value }), error => ({ error }));
     t.mock.timers.tick(15000);
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(15000);
     const outcome = await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve({}))) ]);
     assert.equal(outcome.error?.code, "CLIENT_SERVICE_STATUS_TIMEOUT");
   } finally {
@@ -188,6 +190,76 @@ test("read-only status subprocesses time out without waiting indefinitely", { co
     childProcess.spawn = original;
     syncBuiltinESMExports();
   }
+});
+
+test("concurrent archive reads share one process, retry a timeout once and never cache completed status", async t => {
+  const original = childProcess.spawn;
+  const children = [];
+  const invocations = [];
+  childProcess.spawn = (command, args) => {
+    invocations.push({ command, args });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = () => { child.emit("close", 1); return true; };
+    children.push(child);
+    return child;
+  };
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => { childProcess.spawn = original; syncBuiltinESMExports(); t.mock.timers.reset(); });
+  const ctx = fixture();
+  const read = () => DesktopController.prototype.readFeappStatus.call(ctx.controller, ctx.layout.feappPath);
+  const first = read(), second = read();
+  assert.equal(children.length, 1);
+  t.mock.timers.tick(15000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(children.length, 2);
+  children[1].stdout.emit("data", Buffer.from('{"mounted":false,"revision":"v31"}'));
+  children[1].emit("close", 0);
+  assert.deepEqual(await first, { mounted: false, revision: "v31" });
+  assert.deepEqual(await second, { mounted: false, revision: "v31" });
+  const fresh = read();
+  assert.equal(children.length, 3);
+  children[2].stdout.emit("data", Buffer.from('{"mounted":true,"revision":"v32"}'));
+  children[2].emit("close", 0);
+  assert.deepEqual(await fresh, { mounted: true, revision: "v32" });
+  for (const { command, args } of invocations) {
+    assert.equal(command, "powershell.exe");
+    assert.ok(args.includes("-NonInteractive"));
+    assert.ok(args.includes("-File"));
+  }
+});
+
+test("a legacy WP exposes its own revision and requests upgrade even with current FE", async () => {
+  const ctx = fixture();
+  ctx.controller.readFeappStatus = async () => ({ mounted: true, revision: "v32" });
+  ctx.controller.readWebplayerStatus = async () => ({ managed: true, updateAvailable: true, revision: "v12" });
+  const status = await ctx.controller.getClientStatus();
+  assert.equal(status.updateAvailable, true);
+  assert.equal(status.feappRevision, "v32");
+  assert.equal(status.webplayerRevision, "v12");
+});
+
+test("invalid status and helper failures are not retried and release the pending read", async t => {
+  const original = childProcess.spawn;
+  const children = [];
+  childProcess.spawn = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+    children.push(child); return child;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { childProcess.spawn = original; syncBuiltinESMExports(); });
+  const ctx = fixture();
+  const read = () => DesktopController.prototype.readWebplayerStatus.call(ctx.controller, ctx.layout.webplayerPath);
+  const malformed = read();
+  children[0].stdout.emit("data", Buffer.from("invalid JSON")); children[0].emit("close", 0);
+  await assert.rejects(malformed, SyntaxError);
+  assert.equal(children.length, 1);
+  const failed = read();
+  children[1].stderr.emit("data", Buffer.from("archive invalid")); children[1].emit("close", 1);
+  await assert.rejects(failed, /archive invalid/u);
+  assert.equal(children.length, 2);
 });
 
 test("elevated RefreshOriginal uses PowerShell switch binding without a positional true argument", { concurrency: false }, async () => {

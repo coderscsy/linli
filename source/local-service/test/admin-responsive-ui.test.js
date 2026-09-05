@@ -7,10 +7,11 @@ import test from "node:test";
 // These real-browser checks are opt-in: set OLIVIA_BROWSER_UI=1 and expose Playwright through NODE_PATH.
 const browserTest = process.env.OLIVIA_BROWSER_UI === "1" ? test : test.skip;
 const chromium = process.env.OLIVIA_BROWSER_UI === "1" ? createRequire(import.meta.url)("playwright").chromium : null;
-const [html, css, app] = await Promise.all([
+const [html, css, app, updateUI] = await Promise.all([
   readFile(new URL("../public/index.html", import.meta.url), "utf8"),
   readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
   readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/update-download-ui.js", import.meta.url), "utf8"),
 ]);
 
 const longPath = "I:\\OliviaSoulData\\我的上传\\" + "非常非常长的曲目分类目录\\".repeat(18) + "最终上传曲目.mp4";
@@ -84,10 +85,12 @@ async function openFixture(t) {
   await page.route("http://admin.fixture/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/admin/styles.css") return route.fulfill({ contentType: "text/css", body: css });
+    if (path === "/admin/app-fixture.js") return route.fulfill({ contentType: "text/javascript", body: appWithFixtureHook() });
+    if (path === "/admin/update-download-ui.js") return route.fulfill({ contentType: "text/javascript", body: updateUI });
     return route.fulfill({ contentType: "text/html", body: markup });
   });
   await page.goto("http://admin.fixture/admin/", { waitUntil: "domcontentloaded" });
-  await page.addScriptTag({ content: appWithFixtureHook() });
+  await page.addScriptTag({ type: "module", url: "http://admin.fixture/admin/app-fixture.js" });
   await page.evaluate(({ memory, midi, model }) => window.__renderAdminResponsiveFixture({ memory, midi, model }), {
     memory: fixtureMemory,
     midi: fixtureMidi,

@@ -356,11 +356,14 @@ Copy-PublicFile (Join-Path $ffmpegRoot.FullName "LICENSE.txt") (Join-Path $stage
 
 foreach ($name in @(
     "server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js",
-    "data-migration.js", "storage-paths.js", "storage-migration.js"
+    "data-migration.js", "storage-paths.js", "storage-migration.js", "update-download.js", "update-network.js"
 )) {
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
 }
 Copy-PublicFile (Join-Path $project "package.json") (Join-Path $stage "app\package.json")
+foreach ($name in @('ChineseSimplified.isl', 'English.isl', 'INNO-LICENSE.txt', 'LICENSE.txt', 'SOURCE.md')) {
+    Copy-PublicFile (Join-Path $PSScriptRoot "languages\$name") (Join-Path $stage "installer\$name")
+}
 $nodeModules = Join-Path $project "node_modules"
 if (Test-Path -LiteralPath $nodeModules) {
     Copy-Item -LiteralPath $nodeModules -Destination (Join-Path $stage "app\node_modules") -Recurse -Force

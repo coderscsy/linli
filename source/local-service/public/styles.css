@@ -154,6 +154,13 @@ small { display: block; color: #77777d; font-size: 11px; margin-top: 2px; }
 }
 .sideTab:hover { border: 0; background: #202126; color: #dedbd7; }
 .sideTab.active { background: #292a2f; color: #f2f0ed; }
+.sideTab[data-notice-kind] { position: relative; padding-right: 26px; }
+.sideTab[data-notice-kind]::after {
+  content: ""; position: absolute; top: 9px; right: 10px;
+  width: 7px; height: 7px; border-radius: 50%; background: #dfbd80;
+  box-shadow: 0 0 0 2px #191a1e; pointer-events: none;
+}
+.sideTab[data-notice-kind="fault"]::after { background: #e48c87; }
 .sideTab.active::before {
   position: absolute;
   left: 0;
@@ -554,3 +561,15 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .songEditButton { justify-self: start; width: fit-content; margin-top: 6px; }
 .performanceItem[hidden] { display: none; }
+/* Update progress uses its own full-width row, including narrow/high-DPI windows. */
+.updateDownloadStatus { display: grid; gap: 8px; min-width: 0; margin-top: 12px; }
+.updateDownloadStatus progress { width: 100%; max-width: 100%; height: 10px; accent-color: #d9d1c4; }
+.updateDownloadStatus small, #updateResult { overflow-wrap: anywhere; min-width: 0; }
+.updateActions { flex-wrap: nowrap; gap: 8px; min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 3px; }
+.updateActions > button { flex: 0 0 auto; white-space: nowrap; min-height: 36px; padding: 8px 10px; font-size: 13px; line-height: 1.4; }
+#updateResult { display: block; margin-top: 10px; }
+#updateResult:empty { display: none; }
+#noticeMessage { white-space: pre-line; }
+#noticeDetails { min-width: 0; margin: 12px 0; }
+#noticeDetails summary { cursor: pointer; color: #b9bac1; }
+#noticeErrorText { max-height: 24vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; font-size: 12px; color: #b9bac1; }

@@ -1,6 +1,6 @@
 # OliviaSoul 本机服务与桌面宿主
 
-当前用户说明以[完整使用说明](packaging/使用说明.txt)和[仓库 README](../../README.md)为准；本次为 R10.1，发布标签 `2008.2.7-linli.3`，程序版本 `2008.2.7`。[下载与更新说明](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.3)。
+当前用户说明以[完整使用说明](packaging/使用说明.txt)和[仓库 README](../../README.md)为准；本次为 R10.3 累计更新，更新标识 `2008.2.7-linli.5`，程序版本 `2008.2.7`。[合并更新说明](packaging/发布说明.md)。
 
 ## 当前架构
 

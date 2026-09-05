@@ -751,6 +751,8 @@ test("当前 Inno Setup 脚本只从绑定的审计 stage 嵌入文件", async t
   t.after(() => rm(root, { recursive: true, force: true }));
   const stage = join(root, "stage");
   await put(stage, "app-v9.ico", "fixture icon\n");
+  await put(stage, "installer/ChineseSimplified.isl", await readFile(join(project, "packaging/languages/ChineseSimplified.isl"), "utf8"));
+  await put(stage, "installer/English.isl", await readFile(join(project, "packaging/languages/English.isl"), "utf8"));
   const installer = join(project, "packaging/OliviaSoul.iss");
 
   const result = powershell(`$ErrorActionPreference='Stop'; . ${quote(safetyScript)}; $env:OLIVIA_SOUL_STAGE=${quote(stage)}; Assert-AuditedInstallerSource -InstallerScript ${quote(installer)} -Stage ${quote(stage)} -RequireEnvironmentBinding`);

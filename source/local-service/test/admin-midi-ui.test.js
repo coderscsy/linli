@@ -43,7 +43,7 @@ test("admin UI imports completed performance videos without exposing keyboard-on
   assert.doesNotMatch(app, /\/toy\/genObjectUploadUrl|\/toy\/midi\/generate/u);
   assert.match(app, /\/admin\/api\/midi-library\/preview/u);
   assert.match(app, /\/admin\/api\/midi-library\/confirm/u);
-  assert.match(app, /\/admin\/api\/update\/download/u);
+  // Download requests are behavior-tested in update-download-ui.test.js after modularization.
   assert.match(app, /\/admin\/api\/storage\/migration\/preview/u);
   assert.match(app, /storageMigrationPreviewJobId/u);
   assert.match(app, /pollStorageMigrationPreview/u);

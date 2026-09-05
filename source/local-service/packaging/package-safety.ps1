@@ -724,7 +724,7 @@ function Assert-AuditedInstallerSource {
     $wildcardSourceCount = 0
     $explicitSources = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $filesSectionCount = 0
-    $allowedSections = @('Setup', 'InstallDelete', 'Files', 'Icons', 'Run', 'Code')
+    $allowedSections = @('Setup', 'Languages', 'Messages', 'CustomMessages', 'Tasks', 'InstallDelete', 'Files', 'Icons', 'Run', 'Code')
     foreach ($rawLine in @($text -split "`r?`n")) {
         $line = $rawLine.Trim()
         if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith(';')) { continue }
@@ -815,6 +815,11 @@ function Assert-AuditedInstallerSource {
         }
         if ($line -match '(?i)^(?:SetupIconFile|LicenseFile|InfoBeforeFile|InfoAfterFile|WizardBackImageFile|WizardBackImageFileDynamicDark|WizardImageFile|WizardImageFileDynamicDark|WizardSmallImageFile|WizardSmallImageFileDynamicDark|WizardStyleFile|WizardStyleFileDynamicDark|MessagesFile|UninstallIconFile|UninstallStyle)\s*=') {
             throw "[PRIVACY_INSTALLER_SOURCE] Installer source is not limited to the audited stage"
+        }
+        # Language entries use a closed, quoted format. Reject additional or
+        # unquoted file parameters instead of auditing only regex matches.
+        if ($section -ieq 'Languages' -and $line -notmatch '^(?i)Name:\s*"[\w-]+";\s*MessagesFile:\s*"[^"\r\n]+";?$') {
+            throw "[PRIVACY_INSTALLER_SOURCE] Installer language entry has unaudited parameters"
         }
         if ($line -match '(?i)\b(?:MessagesFile|LicenseFile|InfoBeforeFile|InfoAfterFile)\s*:') {
             if ($section -ine 'Languages') { throw "[PRIVACY_INSTALLER_SOURCE] Installer source is not limited to the audited stage" }

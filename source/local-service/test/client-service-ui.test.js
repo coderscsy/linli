@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { createUpdateDownloadUI } from "../public/update-download-ui.js";
+import { createTabNotices } from "../public/tab-notices.js";
 
 const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
 const mounted = { clientSelected: true, clientFound: true, clientExe: "fixture.exe", mounted: true,
@@ -36,7 +38,7 @@ function fixture(bridge = {}) {
       mountClient: async () => mounted, restoreClient: async () => stopped, ...bridge,
     } },
     document: { querySelector: node, querySelectorAll: () => [], addEventListener() {} },
-    console, URL, AbortController,
+    console, URL, AbortController, createUpdateDownloadUI, createTabNotices,
     fetch: () => { throw new Error("No real HTTP requests in client UI tests"); },
     requestAnimationFrame: callback => callback(),
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; },
@@ -45,7 +47,7 @@ function fixture(bridge = {}) {
   // Run the actual module and registered handlers; only omit unrelated page startup requests.
   const bootstrap = app.lastIndexOf("Promise.all([refresh(), loadDesktopSettings()])");
   assert.ok(bootstrap > 0, "fixture must isolate admin startup from real services");
-  vm.runInContext(app.slice(0, bootstrap), context);
+  vm.runInContext(app.slice(0, bootstrap).replace(/^import .*\r?\n/gmu, ""), context);
   context.initialStatus = mounted;
   vm.runInContext("renderClientMountStatus(initialStatus)", context);
   const flush = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
@@ -203,13 +205,13 @@ test("an old failure refresh cannot overwrite a newer successful enable", async 
   assert.match(f.node("#serviceMountResult").textContent, /服务已启用/u);
 });
 
-test("a status-only refresh returns after 15 seconds and ignores a later stale response", async () => {
+test("a status-only refresh allows a backend retry then ignores a later stale response", async () => {
   const oldStatus = deferred();
   const f = fixture({ getClientStatus: () => oldStatus.promise });
   let finished = false;
   const refresh = f.refresh().then(() => { finished = true; });
   await f.flush();
-  await f.advance(14_999);
+  await f.advance(34_999);
   assert.equal(finished, false);
   await f.advance(1);
   assert.equal(finished, true);
@@ -218,4 +220,63 @@ test("a status-only refresh returns after 15 seconds and ignores a later stale r
   await refresh;
   await f.flush();
   assert.equal(f.node("#serviceMountStatus").textContent, "服务已挂载");
+});
+
+test("legacy managed archives display upgrade versions rather than contradictory partial state", () => {
+  const f = fixture();
+  f.render({ ...mounted, mounted: false, updateAvailable: true, revision: "v31", feappRevision: "v31", webplayerRevision: "v13" });
+  assert.match(f.node("#serviceMountDetail").textContent, /v31.*v13.*更新/u);
+  assert.doesNotMatch(f.node("#serviceMountDetail").textContent, /状态不一致/u);
+  assert.match(f.node("#serviceMountStatus").textContent, /待更新/u);
+  assert.equal(f.node("#mountService").hidden, false);
+});
+
+test("enable cannot claim success when old managed patches remain", async () => {
+  const old = { ...mounted, mounted: false, updateAvailable: true };
+  const f = fixture({ mountClient: async () => old });
+  await f.click("#mountService");
+  assert.match(f.node("#serviceMountResult").textContent, /未完成/u);
+});
+
+test("model checking shows historical availability and refreshes to terminal state without probing", async () => {
+  const f = fixture();
+  const calls = [];
+  f.context.statusApi = async path => {
+    calls.push(path);
+    return { provider: "local", model: "test-model", state: "available", error: null };
+  };
+  vm.runInContext('api = statusApi; renderModelRuntime({ provider: "local", model: "test-model", state: "checking", lastCheck: { state: "available", checkedAt: 1000 } })', f.context);
+  assert.match(f.node("#activeModelProvider").textContent, /上次检测可用.*后台/u);
+  await f.advance(1500);
+  assert.match(f.node("#activeModelProvider").textContent, /· 可用$/u);
+  await f.advance(10000);
+  assert.deepEqual(calls, ["/admin/api/model/status"]);
+});
+
+test("late model poll cannot replace a newly verified configuration", async () => {
+  const f = fixture();
+  const pending = deferred();
+  let reads = 0;
+  f.context.statusApi = () => { reads++; return pending.promise; };
+  vm.runInContext('api = statusApi; renderModelRuntime({ state: "checking" })', f.context);
+  await f.advance(1500);
+  assert.equal(reads, 1);
+  vm.runInContext('renderModelRuntime({ state: "available" })', f.context);
+  pending.resolve({ state: "unavailable" });
+  await f.flush();
+  assert.match(f.node("#activeModelProvider").textContent, /· 可用$/u);
+});
+
+test("model fault dot survives viewing and checking, then clears on recovery", () => {
+  const f = fixture();
+  const button = f.node('.sideTab[data-tab="ai"]');
+  vm.runInContext('renderModelRuntime({ state: "checking" })', f.context);
+  assert.equal(button.dataset.noticeKind, undefined);
+  vm.runInContext('renderModelRuntime({ state: "unavailable" }); tabNotices.visit("ai")', f.context);
+  assert.equal(button.dataset.noticeKind, 'fault');
+  assert.match(button.title, /模型连接失败/u);
+  vm.runInContext('renderModelRuntime({ state: "checking" })', f.context);
+  assert.equal(button.dataset.noticeKind, 'fault');
+  vm.runInContext('renderModelRuntime({ state: "available" })', f.context);
+  assert.equal(button.dataset.noticeKind, undefined);
 });

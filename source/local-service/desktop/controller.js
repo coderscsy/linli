@@ -48,10 +48,10 @@ function runProcess(command, args, { timeoutMs = 0 } = {}) {
     // Only read-only status calls opt into this deadline. Elevated writes must
     // retain their operation lock until the helper actually finishes.
     const timeout = timeoutMs > 0 ? setTimeout(() => {
-      child.kill();
       reject(Object.assign(new Error("客户端只读状态检查超时，请确认后重试"), {
         code: "CLIENT_SERVICE_STATUS_TIMEOUT",
       }));
+      child.kill();
     }, timeoutMs) : null;
     child.stdout.on("data", chunk => outputText += chunk.toString());
     child.stderr.on("data", chunk => errorText += chunk.toString());
@@ -198,17 +198,37 @@ export class DesktopController {
   }
 
   async readFeappStatus(feappPath) {
-    const script = join(this.root, "tools", "get-feapp-status.ps1");
-    const output = await runProcess("powershell.exe", powershellCommand(
-      `& ${powershellLiteral(script)} -FeappPath ${powershellLiteral(feappPath)}`), { timeoutMs: 15_000 });
-    return JSON.parse(output);
+    return this.readClientArchiveStatus("feapp", "-FeappPath", feappPath);
   }
 
   async readWebplayerStatus(webplayerPath) {
-    const script = join(this.root, "tools", "get-webplayer-status.ps1");
-    const output = await runProcess("powershell.exe", powershellCommand(
-      `& ${powershellLiteral(script)} -WebplayerPath ${powershellLiteral(webplayerPath)}`), { timeoutMs: 15_000 });
-    return JSON.parse(output);
+    return this.readClientArchiveStatus("webplayer", "-WebplayerPath", webplayerPath);
+  }
+
+  async readClientArchiveStatus(kind, parameter, archivePath) {
+    // Share only in-flight reads. Never reuse a result after a patch write.
+    const reads = this.clientArchiveReads ??= new Map();
+    const key = JSON.stringify([kind, archivePath]);
+    if (reads.has(key)) return reads.get(key);
+    const pending = (async () => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const started = Date.now();
+        try {
+          const output = await runProcess("powershell.exe", [
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+            join(this.root, "tools", `get-${kind}-status.ps1`), parameter, archivePath,
+          ], { timeoutMs: 15_000 });
+          return JSON.parse(output);
+        } catch (error) {
+          if (error.code !== "CLIENT_SERVICE_STATUS_TIMEOUT") throw error;
+          console.warn(`[client-status] kind=${kind} attempt=${attempt} elapsedMs=${Date.now() - started} timeout`);
+          if (attempt === 2) throw error;
+        }
+      }
+    })();
+    reads.set(key, pending);
+    try { return await pending; }
+    finally { if (reads.get(key) === pending) reads.delete(key); }
   }
 
   async getClientStatus(fixedLayout = null, fixedClientExe = this.clientExePath) {
@@ -233,7 +253,9 @@ export class DesktopController {
       ...feapp,
       mounted: Boolean(feapp.mounted && webplayer.mounted && (!widgets.required || widgets.ready)),
       nativeWidgetsReady: widgets.ready,
-      updateAvailable: Boolean(feapp.updateAvailable || (feapp.mounted && widgets.required && !widgets.ready)),
+      updateAvailable: Boolean(feapp.updateAvailable || webplayer.updateAvailable || (feapp.mounted && widgets.required && !widgets.ready)),
+      feappRevision: feapp.revision ?? null,
+      webplayerRevision: webplayer.revision ?? null,
       feappMounted: Boolean(feapp.mounted || feapp.managed || feapp.updateAvailable),
       webplayerFound: webplayer.clientFound,
       webplayerMounted: Boolean(webplayer.mounted || webplayer.managed || webplayer.updateAvailable),
@@ -777,7 +799,8 @@ export class DesktopController {
       throw new Error("只能安装由 Olivia Soul 下载到本地数据目录的更新包");
     if (extname(target).toLowerCase() !== ".exe") throw new Error("更新包必须是 .exe 安装程序");
     await access(target);
-    return { path: target };
+    if (!this.service?.prepareUpdateInstall) throw new Error('更新服务未就绪，请重新检查更新');
+    return this.service.prepareUpdateInstall(target);
   }
 
   async close() {

@@ -4,7 +4,22 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## R10.1 下载与文档
+## R10.3 累计更新（2026-09-06）
+
+本次发布标识 `2008.2.7-linli.5`，程序版本仍为 `2008.2.7`，合并 R10、R10.1、R10.2 测试版及后续优化，无需逐个安装历史补丁。
+
+[R10.3 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.5) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/SHA256SUMS.txt)
+
+- 下载支持系统代理、暂停/继续/取消及完整性校验；修复旧任务误续传/降级、取消提示覆盖检查结果。
+- 安装向导支持系统语言默认选择和中英文切换，统一安装与错误弹窗。
+- 客户端只读检查合并重复请求、超时重试一次，明确 FE/WP 版本和真实挂载状态。
+- AI 配置及上次检测结果保留，启动后台检查、页面自动刷新，保存测试后同步状态。
+- 管理选项卡新增提醒圆点：金色未读信息、红色待处理异常，悬停说明原因。
+- 完整保留播放/时段/永久曲名修复、原生写信和音乐入口，以及启停、卸载恢复保护。
+
+[合并更新说明](source/local-service/packaging/发布说明.md) · [使用说明](source/local-service/packaging/使用说明.txt)
+
+## R10.1 历史下载与文档
 
 - 软件版本：`2008.2.7`。
 - 发布标识：**R10.1 / `2008.2.7-linli.3`**，日期 `2026-09-05`。程序版本固定为 `2008.2.7`，请同时核对 Release 标签。

@@ -1,4 +1,17 @@
+import { createUpdateDownloadUI } from './update-download-ui.js';
+import { createTabNotices } from './tab-notices.js';
 const $ = selector => document.querySelector(selector);
+let noticeStorage;
+try { noticeStorage = window.localStorage; } catch { /* Storage may be disabled. */ }
+const tabNotices = createTabNotices({ storage: noticeStorage, render(tab, notice) {
+  const button = $(`.sideTab[data-tab="${tab}"]`);
+  if (!button) return;
+  if (notice.kind) button.dataset.noticeKind = notice.kind;
+  else delete button.dataset.noticeKind;
+  const label = button.textContent.trim();
+  button.title = notice.messages.join('；');
+  button.setAttribute?.('aria-label', notice.kind ? `${label}：${button.title}` : label);
+} });
 let previewId = null;
 let aiExchanges = [];
 let aiImportMetadata = null;
@@ -10,9 +23,19 @@ let transcriptionSelection = null;
 let transcriptionJobId = null;
 let remoteMemoryJobId = null;
 let modelConfiguration = null;
+let modelRuntimeSnapshot = null;
+let modelRuntimeTimer = null;
+let modelRuntimeRequest = 0;
 let midiLibraryPreviewId = null;
 let midiStatusSnapshot = null;
 let updateInformation = null;
+const updateDownloadUI = createUpdateDownloadUI({ api,
+  elements: { button: $('#downloadUpdate'), cancel: $('#cancelUpdateDownload'), pause: $('#pauseUpdateDownload'), progress: $('#updateDownloadProgress'),
+    message: $('#updateTransferResult'), details: $('#updateDownloadDetails') },
+  confirmInstall: (message, options) => openNotice({ ...options, message }),
+  showInstallError: options => openNotice(options),
+  install: window.oliviaDesktop?.installUpdate ? path => window.oliviaDesktop.installUpdate(path) : null,
+});
 let storageMigrationPreview = null;
 let storageMigrationPreviewJobId = null;
 let storageMigrationPollTimer = null;
@@ -52,10 +75,13 @@ function closeNotice(result) {
   if (resolver) resolver(result);
 }
 
-function openNotice({ title = "提示", message, confirmText = "确定", cancelText = "" }) {
+function openNotice({ title = "提示", message, confirmText = "确定", cancelText = "", details = "" }) {
   if (noticeResolver) closeNotice(false);
   $("#noticeTitle").textContent = title;
   $("#noticeMessage").textContent = message;
+  $("#noticeDetails").hidden = !details;
+  $("#noticeDetails").open = false;
+  $("#noticeErrorText").textContent = details;
   $("#noticeConfirm").textContent = confirmText;
   $("#noticeCancel").textContent = cancelText;
   $("#noticeCancel").hidden = !cancelText;
@@ -80,6 +106,13 @@ async function api(path, options) {
 }
 
 function renderTaskProgress(prefix, job) {
+  const tab = prefix === 'transcription' ? 'transcription' : 'memory';
+  const failed = job.state === 'failed';
+  const completed = job.state === 'done' && (prefix !== 'remoteMemory' || job.imported === true);
+  tabNotices.set(tab, prefix, failed || completed ? {
+    kind: failed ? 'fault' : 'info', id: String(job.id ?? (prefix === 'transcription' ? transcriptionJobId : remoteMemoryJobId) ?? job.message),
+    message: failed ? '任务失败，请查看详情并重试' : '任务已完成，请查看结果',
+  } : null);
   const progress = $(`#${prefix}Progress`);
   progress.dataset.state = job.state;
   progress.querySelector(".taskProgressTrack span").style.width = `${Math.max(0, Math.min(100, job.percent))}%`;
@@ -144,9 +177,12 @@ async function pollRemoteMemory() {
     return;
   }
   memoryLoaded = false;
+  const completedJobId = remoteMemoryJobId;
   remoteMemoryJobId = null;
   renderMemoryStatus(result);
   renderTaskProgress("remoteMemory", {
+    id: completedJobId,
+    imported: true,
     state: "done",
     percent: 100,
     message: `已导入 ${result.total} 封`,
@@ -168,8 +204,12 @@ function renderIdentity(identity) {
 }
 
 function renderMemoryStatus(status) {
+  tabNotices.set('memory', 'health', ['failed', 'paused', 'pending'].includes(status.state)
+    ? { kind: 'fault', id: status.state, message: status.state === 'failed' ? '记忆整理失败，请重试' : '记忆整理有待处理内容' } : null);
   const progress = $("#memoryProgress");
   const previousState = progress.dataset.state;
+  if (status.state === 'idle' && previousState === 'running')
+    tabNotices.set('memory', 'finished', { kind: 'info', id: String(Date.now()), message: '记忆整理已完成' });
   progress.dataset.state = status.state;
   progress.className = `memoryProgress ${status.state}`;
   progress.style.display = "grid";
@@ -209,17 +249,20 @@ function renderClientMountStatus(status) {
   // A status snapshot is not proof that an unresolved desktop write has stopped.
   if (clientMountAction) { updateClientMountButtons(); return; }
   clientMountSnapshot = status;
+  tabNotices.set('desktop', 'health', status.clientSelected && (status.updateAvailable || (!status.mounted && (status.feappMounted || status.webplayerMounted)) || (status.mounted && status.port !== status.servicePort))
+    ? { kind: 'fault', id: 'client', message: status.updateAvailable ? '客户端补丁待更新' : '客户端挂载或端口状态异常' } : null);
+  tabNotices.set('desktop', 'query', null);
   const badge = $("#serviceMountStatus");
   const partiallyMounted = !status.mounted && (status.feappMounted === true || status.webplayerMounted === true);
   $("#clientExe").value = status.clientExe ?? "";
   badge.className = `mountStatus ${status.mounted || partiallyMounted ? "mounted" : "unmounted"}`;
-  badge.textContent = partiallyMounted ? "服务部分挂载" : status.mounted ? "服务已挂载" : "服务未挂载";
+  badge.textContent = status.updateAvailable ? "客户端补丁待更新" : partiallyMounted ? "服务部分挂载" : status.mounted ? "服务已挂载" : "服务未挂载";
   if (!status.clientSelected) {
     $("#serviceMountDetail").textContent = "请先选择游戏 exe";
+  } else if (status.updateAvailable) {
+    $("#serviceMountDetail").textContent = `界面补丁 FE ${status.feappRevision ?? status.revision ?? "未确认"}，播放器 WP ${status.webplayerRevision ?? "未确认"}；请更新客户端补丁后再启动游戏`;
   } else if (partiallyMounted) {
     $("#serviceMountDetail").textContent = `客户端状态不一致：FE ${status.feappMounted ? "已挂载" : "未挂载"}，WP ${status.webplayerMounted ? "已挂载" : "未挂载"}`;
-  } else if (status.updateAvailable) {
-    $("#serviceMountDetail").textContent = `检测到旧版客户端补丁 ${status.revision ?? ""}，请更新后再启动游戏`;
   } else if (status.mounted) {
     const synchronized = status.port === status.servicePort;
     $("#serviceMountDetail").textContent = synchronized
@@ -251,10 +294,11 @@ async function refreshClientMountStatus({ preserveResult = false } = {}) {
     const outcome = await Promise.race([
       Promise.resolve().then(() => window.oliviaDesktop.getClientStatus())
         .then(status => ({ status }), error => ({ error })),
-      new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 15_000); }),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 35_000); }),
     ]);
     if (generation !== clientMountGeneration || request !== clientMountStatusRequest || clientMountAction) return null;
     if (outcome.status) { renderClientMountStatus(outcome.status); return outcome.status; }
+    tabNotices.set('desktop', 'query', { kind: 'fault', id: 'query', message: '客户端状态检查失败，请查看详情' });
     if (!preserveResult) $("#serviceMountResult").textContent = outcome.timedOut
       ? "状态查询超时，当前客户端状态尚未确认。"
       : `状态查询失败：${clientMountErrorMessage(outcome.error)}`;
@@ -278,7 +322,8 @@ function finishClientMountAction(action, status, error) {
   else updateClientMountButtons();
   const expectedMounted = action.kind === "enable";
   const verified = status?.clientSelected === true && status.clientFound === true && status.webplayerFound === true
-    && status.feappMounted === expectedMounted && status.webplayerMounted === expectedMounted;
+    && status.feappMounted === expectedMounted && status.webplayerMounted === expectedMounted
+    && (!expectedMounted || (status.mounted === true && !status.updateAvailable));
   $("#serviceMountResult").textContent = verified ? `服务已${label}`
     : `${label}未完成：客户端状态未确认或仍有部分挂载，请检查 FE/WP 状态后重试。`;
 }
@@ -368,6 +413,8 @@ function renderModelConfig(config, preserveSelection = false) {
   renderDeepSeek(config.profiles.deepseek);
   renderLocalModel(config.profiles.local);
   showModelProfile(selected);
+  if (modelRuntimeSnapshot?.provider === config.activeProvider && modelRuntimeSnapshot.model === activeProfile.model)
+    renderModelRuntime(modelRuntimeSnapshot);
 }
 
 function toggleSecret(inputSelector, button) {
@@ -401,14 +448,40 @@ function localProfileFromForm() {
 }
 
 function renderModelRuntime(status) {
-  const labels = { unconfigured: "未配置", checking: "正在检测", available: "可用", unavailable: "不可用" };
+  if (!status?.state) return;
+  // A background check is not itself an error; retain a known fault until resolved.
+  if (status.state !== 'checking') tabNotices.set('ai', 'health', ['unconfigured', 'unavailable', 'unknown', 'unchecked'].includes(status.state)
+    ? { kind: 'fault', id: status.state, message: status.state === 'unavailable' ? '模型连接失败，请检查服务或配置' : '模型配置或连接状态需要确认' } : null);
+  else if (status.lastCheck?.state === 'unavailable') tabNotices.set('ai', 'health', {
+    kind: 'fault', id: 'unavailable', message: '上次模型检测失败，正在后台复查',
+  });
+  modelRuntimeSnapshot = status;
+  modelRuntimeRequest++;
+  clearTimeout(modelRuntimeTimer);
+  const labels = { unconfigured: "未配置", unchecked: "配置已保存，待检测", unknown: "状态暂未确认", checking: "后台检测中", available: "可用", unavailable: "不可用" };
   const active = $("#activeModelProvider");
-  if (active && status?.state) {
-    const baseText = active.dataset.baseText || active.textContent;
+  if (active) {
+    const baseText = active.dataset.baseText ?? active.textContent;
     active.dataset.baseText = baseText;
-    active.textContent = `${baseText} · ${labels[status.state] ?? status.state}`;
-    active.title = active.textContent;
+    const historical = status.state === "checking" && status.lastCheck
+      ? `上次检测${status.lastCheck.state === "available" ? "可用" : "不可用"} · ` : "";
+    active.textContent = `${baseText} · ${historical}${labels[status.state] ?? status.state}`;
+    active.title = active.textContent + (status.lastCheck?.checkedAt
+      ? `（上次检测：${new Date(status.lastCheck.checkedAt).toLocaleString()}）` : "");
   }
+  if (status.state === "checking") modelRuntimeTimer = setTimeout(refreshModelRuntime, 1000);
+}
+
+async function refreshModelRuntime() {
+  const request = ++modelRuntimeRequest;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const status = await api("/admin/api/model/status", { signal: controller.signal });
+    if (request === modelRuntimeRequest) renderModelRuntime(status);
+  } catch {
+    if (request === modelRuntimeRequest) renderModelRuntime({ ...modelRuntimeSnapshot, state: "unknown" });
+  } finally { clearTimeout(timer); }
 }
 
 function formatBytes(value) {
@@ -739,20 +812,19 @@ function renderMidiLibraryPreview(preview) {
 }
 
 async function refresh() {
-  const [status, identity, modelConfig, memoryStatus, storageStatus, modelStatus] = await Promise.all([
+  const [status, identity, modelConfig, memoryStatus, storageStatus] = await Promise.all([
     api("/admin/api/status"),
     api("/admin/api/identity"),
     api("/admin/api/model"),
     api("/admin/api/memory/status"),
     api("/admin/api/storage"),
-    api("/admin/api/model/status"),
+    refreshModelRuntime(),
   ]);
   renderStatus(status);
   renderIdentity(identity);
   renderModelConfig(modelConfig);
   renderMemoryStatus(memoryStatus);
   renderStorageStatus(storageStatus);
-  renderModelRuntime(modelStatus);
   if (window.oliviaDesktop) await refreshClientMountStatus();
 }
 
@@ -781,18 +853,27 @@ async function loadDesktopSettings() {
 }
 
 function renderUpdateInformation(data) {
+  tabNotices.set('update', 'release', data.updateAvailable
+    ? { kind: 'info', id: String(data.latestTag), message: `有新版本 ${data.latestTag}` } : null);
+  tabNotices.set('update', 'check', null);
   updateInformation = data;
   $("#updateVersion").textContent = `当前 ${data.currentTag} · GitHub 最新 ${data.latestTag}`;
   $("#downloadUpdate").hidden = !data.updateAvailable;
-  $("#updateResult").textContent = data.updateAvailable ? "发现新版本，可以下载" : "当前已经是最新版本";
+  $("#updateResult").textContent = data.updateAvailable ? "发现新版本，可以下载"
+    : data.currentTag !== data.latestTag ? "当前版本高于 GitHub 公开版，无需更新" : "当前已经是最新版本";
+  updateDownloadUI.setRelease(data);
 }
 
 async function loadUpdate() {
   startLoading("#updateResult", "正在查询 GitHub Release……");
   try {
     renderUpdateInformation(await api("/admin/api/update"));
+  } catch (error) {
+    tabNotices.set('update', 'check', { kind: 'fault', id: 'check', message: '更新检查失败，可进入页面重试' });
+    throw error;
   } finally {
     stopLoading("#updateResult");
+    await updateDownloadUI.refresh();
   }
 }
 
@@ -830,10 +911,12 @@ document.addEventListener("keydown", event => {
 });
 document.querySelectorAll(".sideTab").forEach(button => {
   button.addEventListener("click", safely(async () => {
+    tabNotices.visit(button.dataset.tab);
     document.querySelectorAll(".sideTab").forEach(tab => tab.classList.toggle("active", tab === button));
     document.querySelectorAll(".tabPage").forEach(page => page.hidden = page.dataset.page !== button.dataset.tab);
     const content = document.querySelector(".content");
     if (content) content.scrollTop = 0;
+    updateDownloadUI.setVisible(button.dataset.tab === "update");
     if (button.dataset.tab === "memory" && !memoryLoaded) await loadMemory();
     if (button.dataset.tab === "performances") await refreshMidiStatus();
     if (button.dataset.tab === "update" && !updateInformation) await loadUpdate();
@@ -1069,7 +1152,7 @@ $("#resetModelConfig").addEventListener("click", safely(async event => {
   $("#resetModelResult").textContent = "正在清除……";
   try {
     renderModelConfig(await api("/admin/api/models/reset", { method: "POST", body: "{}" }));
-    renderModelRuntime(await api("/admin/api/model/status"));
+    await refreshModelRuntime();
     $("#resetModelResult").textContent = "模型配置已清除";
   } finally {
     button.disabled = false;
@@ -1094,19 +1177,13 @@ $("#checkUpdate").addEventListener("click", safely(async () => {
   await loadUpdate();
 }));
 $("#downloadUpdate").addEventListener("click", safely(async () => {
-  if (!updateInformation?.updateAvailable) return;
-  if (!await confirmNotice(`确认下载 ${updateInformation.latestTag}？安装包会保存到本地数据目录。`)) return;
-  $("#downloadUpdate").disabled = true;
-  startLoading("#updateResult", "正在下载并校验安装包，请不要关闭程序……");
-  try {
-    const downloaded = await api("/admin/api/update/download", { method: "POST", body: "{}" });
-    $("#updateResult").textContent = `下载完成：${downloaded.path}`;
-    if (window.oliviaDesktop?.installUpdate && await confirmNotice("安装包已通过 SHA-256 校验。现在启动安装程序并关闭 Olivia Soul？"))
-      await window.oliviaDesktop.installUpdate(downloaded.path);
-  } finally {
-    $("#downloadUpdate").disabled = false;
-    stopLoading("#updateResult");
-  }
+  await updateDownloadUI.start();
+}));
+$("#cancelUpdateDownload").addEventListener("click", safely(async () => {
+  await updateDownloadUI.cancel();
+}));
+$("#pauseUpdateDownload").addEventListener("click", safely(async () => {
+  await updateDownloadUI.pause();
 }));
 $("#showSummaries").addEventListener("change", safely(async event => {
   showMemorySummaries = event.target.checked;
@@ -1180,6 +1257,7 @@ $("#testDeepSeek").addEventListener("click", safely(() => runModelOperation({
       body: JSON.stringify(deepSeekProfileFromForm()),
     });
     renderModelConfig(result.config, true);
+    await refreshModelRuntime();
     return result;
   },
 })));
@@ -1196,11 +1274,20 @@ $("#testLocalModel").addEventListener("click", safely(() => runModelOperation({
       body: JSON.stringify(localProfileFromForm()),
     });
     renderModelConfig(result.config, true);
+    await refreshModelRuntime();
     return result;
   },
 })));
 $("#detectActiveModel").addEventListener("click", safely(async () => {
-  renderModelRuntime(await api("/admin/api/model/detect", { method: "POST", body: "{}" }));
+  const button = $("#detectActiveModel");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    await api("/admin/api/model/detect", { method: "POST", body: "{}" });
+  } finally {
+    await refreshModelRuntime();
+    button.disabled = false;
+  }
 }));
 $("#activateModelProvider").addEventListener("click", safely(() => {
   const provider = $("#modelProvider").value;
@@ -1216,6 +1303,7 @@ $("#activateModelProvider").addEventListener("click", safely(() => {
         body: JSON.stringify({ provider }),
       });
       renderModelConfig(result, true);
+      await refreshModelRuntime();
       return result;
     },
   });
@@ -1428,4 +1516,6 @@ function showError(error) {
 }
 
 Promise.all([refresh(), loadDesktopSettings()]).catch(showError);
+// One quiet release check per page load; never downloads or installs automatically.
+void loadUpdate().catch(() => {});
 setInterval(() => refreshStatus().catch(console.error), 5000);

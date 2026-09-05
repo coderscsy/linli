@@ -297,10 +297,17 @@
               <strong>软件更新</strong>
               <small id="updateVersion">手动检查 GitHub Release，不会上传本地配置或密钥</small>
             </div>
-            <div class="actions">
+            <div class="actions updateActions" aria-label="下载操作">
               <button id="checkUpdate" class="secondary" type="button">检查更新</button>
               <button id="downloadUpdate" type="button" hidden>下载并安装更新</button>
-              <span id="updateResult" class="result"></span>
+              <button id="pauseUpdateDownload" class="secondary" type="button" hidden title="暂停下载并保留已下载文件">暂停下载</button>
+              <button id="cancelUpdateDownload" class="secondary" type="button" hidden title="停止下载并删除本次下载的文件">取消下载</button>
+            </div>
+            <div id="updateResult" class="result" role="status"></div>
+            <div id="updateTransferResult" class="result" role="status"></div>
+            <div class="updateDownloadStatus">
+              <progress id="updateDownloadProgress" max="100" value="0" aria-label="安装包下载进度" hidden></progress>
+              <small id="updateDownloadDetails" aria-live="polite" hidden></small>
             </div>
           </section>
         </section>
@@ -517,6 +524,10 @@
         <button id="noticeClose" class="noticeClose" type="button" aria-label="关闭">×</button>
       </div>
       <p id="noticeMessage"></p>
+      <details id="noticeDetails" hidden>
+        <summary>查看详情</summary>
+        <pre id="noticeErrorText"></pre>
+      </details>
       <div class="noticeActions">
         <button id="noticeCancel" class="secondary" type="button" hidden>取消</button>
         <button id="noticeConfirm" type="button">确定</button>

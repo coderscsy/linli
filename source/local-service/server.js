@@ -5,7 +5,9 @@ import { copyFile, readFile, writeFile, mkdir, open, rename, rm, stat, statfs } 
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { Readable, Transform } from "node:stream";
+import { Transform } from "node:stream";
+import { createUpdateDownloader } from "./update-download.js";
+import { createUpdateFetch } from "./update-network.js";
 import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -67,8 +69,7 @@ const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 const DEFAULT_UPDATE_REPOSITORY = "coderscsy/linli";
-const DEFAULT_UPDATE_TAG = "2008.2.7-linli.3";
-const MAX_UPDATE_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_UPDATE_TAG = "2008.2.7-linli.5";
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions?/i,
   /system\s*prompt/i,
@@ -670,11 +671,13 @@ export async function createOliviaService(options = {}) {
   }
   const generator = options.generator ?? deepSeekGenerator;
   const request = options.fetch ?? fetch;
+  const updateRequest = options.updateFetch ?? options.fetch ?? createUpdateFetch();
 
-  async function fetchLatestRelease() {
+  async function fetchLatestRelease(signal) {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(updateRepository))
       throw new Error("更新仓库配置无效");
-    const response = await request(`https://api.github.com/repos/${updateRepository}/releases/latest`, {
+    const response = await updateRequest(`https://api.github.com/repos/${updateRepository}/releases/latest`, {
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": "OliviaSoul-Updater",
@@ -696,6 +699,7 @@ export async function createOliviaService(options = {}) {
       releaseUrl: String(release.html_url ?? `https://github.com/${updateRepository}/releases/latest`),
       publishedAt: String(release.published_at ?? ""),
       asset: {
+        id: asset.id,
         name: basename(String(asset.name)),
         url: downloadUrl.toString(),
         size: Math.max(0, Number(asset.size) || 0),
@@ -703,6 +707,16 @@ export async function createOliviaService(options = {}) {
       },
     };
   }
+
+  const updateDownloads = await createUpdateDownloader({
+    root: updateDataRoot, request: updateRequest,
+    canInstall: tag => isNewerRelease(updateCurrentTag, tag),
+    fetchRelease: async signal => {
+      const release = await fetchLatestRelease(signal);
+      if (!isNewerRelease(updateCurrentTag, release.latestTag)) throw new Error("当前已经是最新版本");
+      return release;
+    },
+  });
 
   function updatePayload(release) {
     return {
@@ -1018,9 +1032,43 @@ export async function createOliviaService(options = {}) {
       throw httpError(409, "模型配置已被更新的操作取代，请刷新后重试", "MODEL_CONFIG_SUPERSEDED");
   }
 
-  function commitModelRuntimeStatus(generation, status) {
-    if (generation === modelRuntimeGeneration) modelRuntimeStatus = status;
+  function modelStatusFingerprint(profile) {
+    return createHash("sha256").update(JSON.stringify([
+      profile.provider, profile.baseUrl, profile.model, profile.authMode, profile.apiKey,
+    ])).digest("hex");
+  }
+
+  function lastModelCheck(profile) {
+    try {
+      const saved = JSON.parse(getSetting(`model_last_check:${profile.provider}`) || "null");
+      return saved?.fingerprint === modelStatusFingerprint(profile)
+        && ["available", "unavailable"].includes(saved.state) && Number.isFinite(saved.checkedAt)
+        ? { state: saved.state, checkedAt: saved.checkedAt } : null;
+    } catch { return null; }
+  }
+
+  function commitModelRuntimeStatus(generation, status, profile) {
+    if (generation !== modelRuntimeGeneration || closing) return modelRuntimeStatus;
+    if (profile) {
+      if (["available", "unavailable"].includes(status.state)) {
+        const lastCheck = { state: status.state, checkedAt: Date.now() };
+        // Persist no endpoint, API key or provider error text in status history.
+        setSetting(`model_last_check:${profile.provider}`, JSON.stringify({
+          fingerprint: modelStatusFingerprint(profile), ...lastCheck,
+        }));
+        status = { ...status, lastCheck };
+      } else status = { ...status, lastCheck: lastModelCheck(profile) };
+    }
+    modelRuntimeStatus = status;
     return modelRuntimeStatus;
+  }
+
+  function syncSavedModelStatus(config, provider, verified) {
+    if (config.activeProvider !== provider) return;
+    const profile = activeModelProfile(config);
+    commitModelRuntimeStatus(++modelRuntimeGeneration, {
+      provider, model: profile.model, state: verified ? "available" : "unchecked", error: null,
+    }, profile);
   }
 
   async function detectActiveModel() {
@@ -1029,7 +1077,7 @@ export async function createOliviaService(options = {}) {
     const config = await readModelConfig({ root });
     const provider = config.activeProvider;
     const profile = activeModelProfile(config);
-    commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "checking", error: null });
+    commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "checking", error: null }, profile);
     try {
       if (!profile.model || !profile.baseUrl || (profile.authMode === "bearer" && !profile.apiKey)) {
         commitModelRuntimeStatus(generation, {
@@ -1037,12 +1085,12 @@ export async function createOliviaService(options = {}) {
         });
       } else {
         await executeModelProbe(buildModelProbeCall(profile));
-        commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "available", error: null });
+        commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "available", error: null }, profile);
       }
     } catch (error) {
       commitModelRuntimeStatus(generation, {
         provider, model: profile.model, state: "unavailable", error: safeModelError(error),
-      });
+      }, profile);
     }
     return modelRuntimeStatus;
   }
@@ -2556,7 +2604,7 @@ export async function createOliviaService(options = {}) {
 
   async function serveStatic(req, res, pathname) {
     const relative = pathname === "/admin" || pathname === "/admin/" ? "index.html" : pathname.slice("/admin/".length);
-    if (!["index.html", "app.js", "song-editor.js", "styles.css", "olivia-soul-gold.png"].includes(relative))
+    if (!["index.html", "app.js", "song-editor.js", "update-download-ui.js", "tab-notices.js", "styles.css", "olivia-soul-gold.png"].includes(relative))
       throw httpError(404, "文件不存在");
     const file = join(publicRoot, relative);
     const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png" };
@@ -3348,53 +3396,22 @@ export async function createOliviaService(options = {}) {
     }
 
     if (req.method === "POST" && path === "/admin/api/update/download") {
-      let release;
-      try {
-        release = await fetchLatestRelease();
-      } catch (error) {
-        throw httpError(502, `检查更新失败：${safeModelError(error)}`);
-      }
-      if (!isNewerRelease(updateCurrentTag, release.latestTag))
-        throw httpError(409, "当前已经是最新版本");
-      if (release.asset.size > MAX_UPDATE_BYTES) throw httpError(413, "更新安装包超过 1 GiB");
-      const targetDir = join(updateDataRoot, release.latestTag);
-      const target = join(targetDir, release.asset.name);
-      const temporary = `${target}.part-${randomUUID()}`;
-      await mkdir(targetDir, { recursive: true });
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000);
-      try {
-        const response = await request(release.asset.url, {
-          headers: { "User-Agent": "OliviaSoul-Updater" },
-          signal: controller.signal,
-        });
-        if (!response.ok || !response.body) throw new Error(`下载 HTTP ${response.status}`);
-        const contentLength = Number(response.headers.get("content-length") ?? 0);
-        if (contentLength > MAX_UPDATE_BYTES) throw new Error("更新安装包超过 1 GiB");
-        let bytes = 0;
-        const hash = createHash("sha256");
-        const meter = new Transform({
-          transform(chunk, _encoding, callback) {
-            bytes += chunk.length;
-            if (bytes > MAX_UPDATE_BYTES) return callback(new Error("更新安装包超过 1 GiB"));
-            hash.update(chunk);
-            callback(null, chunk);
-          },
-        });
-        await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(temporary, { flags: "wx" }));
-        if (release.asset.size && bytes !== release.asset.size)
-          throw new Error(`安装包大小不完整：${bytes}/${release.asset.size}`);
-        const digest = hash.digest("hex");
-        if (release.asset.digest.startsWith("sha256:") && digest !== release.asset.digest.slice(7))
-          throw new Error("安装包 SHA-256 校验失败");
-        await rename(temporary, target);
-        return ok(req, res, { tag: release.latestTag, path: target, bytes, sha256: digest });
-      } catch (error) {
-        await rm(temporary, { force: true });
-        throw httpError(502, `下载更新失败：${safeModelError(error)}`);
-      } finally {
-        clearTimeout(timer);
-      }
+      return ok(req, res, updateDownloads.start());
+    }
+
+    if (req.method === "GET" && path === "/admin/api/update/download/status")
+      return ok(req, res, updateDownloads.status());
+
+    if (req.method === "POST" && path === "/admin/api/update/download/cancel") {
+      const body = await readJson(req);
+      if (!Object.hasOwn(body, 'jobId')) throw httpError(400, '缺少下载任务标识');
+      return ok(req, res, await updateDownloads.cancel(body.jobId));
+    }
+
+    if (req.method === "POST" && path === "/admin/api/update/download/pause") {
+      const body = await readJson(req);
+      if (!Object.hasOwn(body, 'jobId')) throw httpError(400, '缺少下载任务标识');
+      return ok(req, res, await updateDownloads.pause(body.jobId));
     }
 
     if (req.method === "GET" && path === "/admin/api/model") {
@@ -3405,6 +3422,7 @@ export async function createOliviaService(options = {}) {
       modelRuntimeGeneration += 1;
       modelConfigMutationGeneration += 1;
       const config = await queueModelConfigWrite(() => resetModelConfig({ root }));
+      db.prepare("DELETE FROM settings WHERE key IN ('model_last_check:deepseek', 'model_last_check:local')").run();
       const profile = activeModelProfile(config);
       modelRuntimeStatus = {
         provider: config.activeProvider,
@@ -3484,6 +3502,7 @@ export async function createOliviaService(options = {}) {
             },
           });
           assertCurrentModelMutation(operationGeneration);
+          syncSavedModelStatus(result, provider, false);
           return result;
         });
         return ok(req, res, modelConfigPayload(saved));
@@ -3515,10 +3534,9 @@ export async function createOliviaService(options = {}) {
         assertCurrentModelMutation(operationGeneration);
         const result = await setActiveProvider({ root, provider });
         assertCurrentModelMutation(operationGeneration);
+        syncSavedModelStatus(result, provider, true);
         return result;
       });
-      modelRuntimeGeneration += 1;
-      modelRuntimeStatus = { provider, model: profile.model, state: "available", error: null };
       return ok(req, res, modelConfigPayload(saved));
     }
 
@@ -3553,6 +3571,7 @@ export async function createOliviaService(options = {}) {
           assertCurrentModelMutation(operationGeneration);
           const result = await writeModelProfile({ root, provider, profile: candidate });
           assertCurrentModelMutation(operationGeneration);
+          syncSavedModelStatus(result, provider, true);
           return result;
         });
         return ok(req, res, { connected: true, provider, config: modelConfigPayload(saved) });
@@ -4009,6 +4028,7 @@ export async function createOliviaService(options = {}) {
   wakeWorker();
   return {
     db,
+    prepareUpdateInstall: path => updateDownloads.prepareInstall(path),
     midiStore,
     midiPipeline: null,
     midiQueue,
@@ -4051,6 +4071,7 @@ export async function createOliviaService(options = {}) {
     },
     async close() {
       closing = true;
+      const downloadsClosed = updateDownloads.close();
       const nameCorrectionsClosed = songNameCorrections.close();
       const previewSourcesClosed = resolveSongPreview.close?.();
       clearTimeout(workerTimer);
@@ -4075,6 +4096,7 @@ export async function createOliviaService(options = {}) {
       if (server.listening) await new Promise(resolvePromise => server.close(resolvePromise));
       await nameCorrectionsClosed;
       await previewSourcesClosed;
+      await downloadsClosed;
       db.close();
     },
   };

@@ -38,6 +38,7 @@ async function fixture(options = {}) {
     delaySeconds: options.delaySeconds ?? 300,
     generator: options.generator ?? (async ({ content }) => `回信：${content}`),
     fetch: options.fetch,
+    updateFetch: options.updateFetch,
     runMemoryRefresh: Boolean(options.memoryRefresher),
     memoryRefresher: options.memoryRefresher,
     memoryRetryIntervalMs: options.memoryRetryIntervalMs,
@@ -839,7 +840,9 @@ test("桌面更新安装器只接受数据目录 updates 下的 exe", async () =
     await mkdir(dirname(installer), { recursive: true });
     await writeFile(installer, "verified installer");
     await writeFile(outside, "untrusted installer");
-    assert.deepEqual(await controller.prepareUpdateInstall(installer), { path: resolve(installer) });
+    await assert.rejects(controller.prepareUpdateInstall(installer), /更新服务未就绪/u);
+    controller.service = { prepareUpdateInstall: async () => { throw new Error('安装包版本不高于当前版本'); } };
+    await assert.rejects(controller.prepareUpdateInstall(installer), /版本/u);
     await assert.rejects(controller.prepareUpdateInstall(outside), /只能安装/u);
     await assert.rejects(controller.prepareUpdateInstall(join(dataDir, "updates", "note.txt")), /必须是 \.exe/u);
   } finally {
@@ -2874,6 +2877,64 @@ test("兼容模型接口从标准 models 端点查询候选且不切换当前档
   assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "deepseek");
 });
 
+test("admin serves the tab notification module required by the app", async t => {
+  const ctx = await fixture(); t.after(() => ctx.close());
+  const address = ctx.service.server.address();
+  const response = await fetch(`http://127.0.0.1:${address.port}/admin/tab-notices.js`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /javascript/u);
+  assert.equal(await response.text(), await readFile(new URL('../public/tab-notices.js', import.meta.url), 'utf8'));
+});
+
+test("active model test-save updates runtime and status reads never execute probes", async t => {
+  let calls = 0;
+  const ctx = await fixture({ fetch: async () => { calls++; return Response.json({ choices: [{ message: { content: "OK" } }] }); } });
+  t.after(() => ctx.close());
+  const saved = await ctx.request("/admin/api/model/test-save", { method: "POST", body: JSON.stringify({
+    provider: "deepseek", baseUrl: "https://example.test/v1", model: "verified-model", authMode: "bearer", apiKey: "test-only-key",
+  }) });
+  assert.equal(saved.status, 200);
+  for (let i = 0; i < 3; i++) {
+    const status = (await ctx.request("/admin/api/model/status")).body.data;
+    assert.equal(status.state, "available");
+    assert.equal(status.model, "verified-model");
+    assert.ok(status.lastCheck.checkedAt > 0);
+  }
+  assert.equal(calls, 1);
+  await ctx.request("/admin/api/model/profile", { method: "POST", body: JSON.stringify({ provider: "deepseek", model: "different-model" }) });
+  const changed = (await ctx.request("/admin/api/model/status")).body.data;
+  assert.equal(changed.state, "unchecked");
+  assert.equal(changed.lastCheck, null);
+  await ctx.request("/admin/api/models/reset", { method: "POST", body: "{}" });
+  assert.equal(ctx.service.db.prepare("SELECT count(*) AS n FROM settings WHERE key LIKE 'model_last_check:%'").get().n, 0);
+});
+
+test("model restart retains historical result while background probe is pending", async t => {
+  const ctx = await fixture({ fetch: async () => Response.json({ choices: [{ message: { content: "OK" } }] }) });
+  await ctx.request("/admin/api/model/test-save", { method: "POST", body: JSON.stringify({
+    provider: "deepseek", baseUrl: "https://example.test/v1", model: "saved-model", authMode: "bearer", apiKey: "private-fixture-key",
+  }) });
+  await ctx.service.close();
+  let release, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const restarted = await createOliviaService({ root: ctx.root, dataDir: join(ctx.root, "data"), worker: false,
+    fetch: () => { entered(); return new Promise(resolve => { release = resolve; }); } });
+  t.after(async () => { release?.(Response.json({ choices: [{ message: { content: "OK" } }] })); await restarted.close(); await rm(ctx.root, { recursive: true, force: true }); });
+  const address = await restarted.listen(0);
+  await started;
+  const status = await new Promise((resolve, reject) => {
+    const req = httpRequest({ hostname: "127.0.0.1", port: address.port, path: "/admin/api/model/status" }, res => {
+      let body = ""; res.on("data", chunk => { body += chunk; }); res.on("end", () => resolve(JSON.parse(body).data));
+    }); req.on("error", reject); req.end();
+  });
+  assert.equal(status.state, "checking");
+  assert.equal(status.lastCheck.state, "available");
+  assert.ok(status.lastCheck.checkedAt > 0);
+  const stored = restarted.db.prepare("SELECT value FROM settings WHERE key LIKE 'model_last_check:%'").all();
+  assert.ok(stored.length > 0);
+  assert.doesNotMatch(JSON.stringify(stored), /private-fixture-key|example\.test/u);
+});
+
 test("保存并测试失败时保留原模型档案", async t => {
   const ctx = await fixture({
     fetch: async () => new Response("unavailable", { status: 503 }),
@@ -2994,7 +3055,7 @@ test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
   }
 });
 
-test("R10.1 默认更新标识不会把当前修复包误报为待更新", async t => {
+test("R10.3 默认更新标识不会把旧公开包误报为待更新", async t => {
   const calls = [];
   const ctx = await fixture({ fetch: async url => {
     calls.push(url);
@@ -3007,7 +3068,7 @@ test("R10.1 默认更新标识不会把当前修复包误报为待更新", async
   assert.equal(calls.length, 0, "启动服务不应主动检查更新");
   const checked = await ctx.request("/admin/api/update");
   assert.equal(checked.status, 200);
-  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.3");
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.5");
   assert.equal(checked.body.data.updateAvailable, false);
   assert.equal(calls.length, 1);
 });
@@ -3028,7 +3089,8 @@ test("检查更新从公开 GitHub Release 查询并校验下载 Setup 到 I 盘
   };
   const ctx = await fixture({
     updateCurrentTag: "2008.2.7-linli.2",
-    fetch: async url => {
+    fetch: async () => { throw new Error('Updates must not use the AI transport'); },
+    updateFetch: async url => {
       calls.push(url);
       return url.includes("api.github.com") ? Response.json(release) : new Response(installer);
     },
@@ -3042,12 +3104,59 @@ test("检查更新从公开 GitHub Release 查询并校验下载 Setup 到 I 盘
   assert.equal(checked.body.data.updateAvailable, true);
   assert.doesNotMatch(JSON.stringify(checked.body), /browser_download_url/u);
 
-  const downloaded = await ctx.request("/admin/api/update/download", { method: "POST" });
-  assert.equal(downloaded.status, 200);
+  const initial = await ctx.request("/admin/api/update/download/status");
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.data.state, "idle");
+  assert.equal(calls.length, 1, "读取本地状态不会查询 GitHub");
+  const started = await ctx.request("/admin/api/update/download", { method: "POST" });
+  assert.equal(started.status, 200);
+  assert.equal(started.body.data.state, "connecting");
+  let downloaded;
+  for (let i = 0; i < 100; i++) {
+    downloaded = await ctx.request("/admin/api/update/download/status");
+    if (downloaded.body.data.state === "completed" && !downloaded.body.data.running) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(downloaded.body.data.state, "completed", downloaded.body.data.error);
   assert.equal(downloaded.body.data.tag, "2008.2.7-linli.3");
-  assert.match(downloaded.body.data.path, /updates[\\/]2008\.2\.7-linli\.3[\\/]OliviaSoul-2008\.2\.7-Setup\.exe$/u);
+  assert.match(downloaded.body.data.path, /updates[\\/]2008\.2\.7-linli\.3[\\/][a-f0-9]{64}[\\/]OliviaSoul-2008\.2\.7-Setup\.exe$/u);
   assert.deepEqual(await readFile(downloaded.body.data.path), installer);
+  assert.deepEqual(await ctx.service.prepareUpdateInstall(downloaded.body.data.path), { path: downloaded.body.data.path });
   assert.equal(calls.filter(url => url.includes("api.github.com")).length, 2);
+});
+
+test('更新取消接口删除当前部分下载并拒绝旧任务标识', async t => {
+  const ctx = await fixture({ updateCurrentTag: 'test.1', updateFetch: async (url, init) => {
+    if (url.includes('api.github.com')) return Response.json({ tag_name: 'test.2', assets: [{ id: 1,
+      name: 'OliviaSoul-Test-Setup.exe', size: 1000, digest: `sha256:${'a'.repeat(64)}`,
+      browser_download_url: 'https://github.com/example/project/releases/download/test.2/OliviaSoul-Test-Setup.exe',
+    }] });
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new Uint8Array(100));
+      init.signal.addEventListener('abort', () => controller.error(init.signal.reason), { once: true });
+    } }));
+  } });
+  t.after(() => ctx.close());
+  const started = await ctx.request('/admin/api/update/download', { method: 'POST' });
+  let status;
+  for (let i = 0; i < 100; i++) {
+    status = await ctx.request('/admin/api/update/download/status');
+    if (status.body.data.bytes === 100) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(status.body.data.bytes, 100);
+  const paused = await ctx.request('/admin/api/update/download/pause', { method: 'POST',
+    body: JSON.stringify({ jobId: started.body.data.jobId }) });
+  assert.equal(paused.status, 200); assert.equal(paused.body.data.state, 'paused');
+  assert.equal(paused.body.data.bytes, 100); assert.equal(paused.body.data.running, false);
+  const missingPauseId = await ctx.request('/admin/api/update/download/pause', { method: 'POST', body: '{}' });
+  assert.equal(missingPauseId.status, 400);
+  const cancelled = await ctx.request('/admin/api/update/download/cancel', { method: 'POST',
+    body: JSON.stringify({ jobId: started.body.data.jobId }) });
+  assert.equal(cancelled.status, 200); assert.equal(cancelled.body.data.state, 'cancelled');
+  assert.equal(cancelled.body.data.bytes, 0); assert.equal(cancelled.body.data.running, false);
+  const invalid = await ctx.request('/admin/api/update/download/cancel', { method: 'POST', body: '{}' });
+  assert.equal(invalid.status, 400);
 });
 
 test("模型检测失败时拒绝启用且保留原当前模型", async t => {

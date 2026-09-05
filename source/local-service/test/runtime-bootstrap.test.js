@@ -38,7 +38,13 @@ test("Windows 宿主将耐久数据固定在安装目录 UserData 并传入游�
   assert.match(controller, /usersettingsPath:\s*this\.usersettingsPath/u);
   assert.match(controller, /deferStorageRefresh:\s*true/u,
     "大型官方作品迁移必须在服务开始监听后执行，不能触发桌面宿主启动超时");
-  assert.doesNotMatch(installer, /UserData[^\n]*(delete|del)/iu);
+  // Audit executable cleanup sections, not translated text such as
+  // "UserData ... source videos are not deleted" in CustomMessages.
+  const cleanupSections = [...installer.matchAll(/^\[(InstallDelete|UninstallDelete|Code)\]\s*\r?\n([\s\S]*?)(?=^\[|$(?![\s\S]))/gmu)]
+    .map(match => match[2]).join("\n");
+  assert.doesNotMatch(cleanupSections, /UserData[^\n]*(delete|del)/iu);
+  assert.doesNotMatch(cleanupSections, /(?:DeleteFile|DelTree)\([^;]*UserData/iu);
+  assert.doesNotMatch(cleanupSections, /^Type:[^\n]*Name:\s*"\{app\}\\UserData(?:\\|"|$)/imu);
 });
 
 test("WebView2 与 Electron 仅在可编辑文本中提供右键编辑菜单并保留托盘菜单", async () => {
