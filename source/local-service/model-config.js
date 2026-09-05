@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const DEFAULT_DEEPSEEK_PROFILE = Object.freeze({
@@ -12,7 +12,7 @@ export const DEFAULT_DEEPSEEK_PROFILE = Object.freeze({
 export const DEFAULT_LOCAL_PROFILE = Object.freeze({
   provider: "local",
   baseUrl: "http://127.0.0.1:8000/v1",
-  model: "gemma-4-26b-a4b-it-ultra-uncensored-heretic",
+  model: "local-model",
   authMode: "none",
   apiKey: "",
 });
@@ -138,6 +138,15 @@ export async function readModelConfig({ root, env = process.env }) {
   };
 }
 
+export async function resetModelConfig({ root }) {
+  const secrets = join(root, ".cursor", "secrets");
+  await Promise.all([
+    rm(join(secrets, "model.env"), { force: true }),
+    rm(join(secrets, "deepseek.env"), { force: true }),
+  ]);
+  return readModelConfig({ root, env: {} });
+}
+
 export async function writeModelProfile({ root, provider, profile }) {
   const selected = normalizeProvider(provider);
   const config = await readModelConfig({ root });
@@ -175,5 +184,19 @@ export function buildChatRequest(profile, payload = {}) {
     url: `${selected.baseUrl}/chat/completions`,
     headers,
     body,
+  };
+}
+
+export function buildModelListRequest(profile) {
+  const selected = normalizeProvider(profile.provider);
+  const authMode = assertSingleLine(profile.authMode, "鉴权方式") || (selected === "deepseek" ? "bearer" : "none");
+  if (!AUTH_MODES.has(authMode)) throw new Error("鉴权方式只能是 bearer 或 none");
+  const apiKey = assertSingleLine(profile.apiKey, "API Key");
+  if (authMode === "bearer" && !apiKey) throw new Error("Bearer 鉴权需要填写 API Key");
+  const headers = { Accept: "application/json" };
+  if (authMode === "bearer") headers.Authorization = `Bearer ${apiKey}`;
+  return {
+    url: `${normalizeBaseUrl(profile.baseUrl)}/models`,
+    headers,
   };
 }

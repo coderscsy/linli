@@ -1,5 +1,7 @@
-﻿param(
+﻿[CmdletBinding()]
+param(
     [string]$OutputDirectory = "",
+    [string]$WorkDirectory = "",
     [string]$DotNet = "",
     [string]$Iscc = "",
     [switch]$ResolvePathsOnly,
@@ -11,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $project = Split-Path $PSScriptRoot -Parent
 $repository = Split-Path $project -Parent
 $utf8NoBom = New-Object Text.UTF8Encoding $false
+. (Join-Path $PSScriptRoot "package-safety.ps1")
 
 $version = "2008.2.7"
 $packagePath = Join-Path $project "package.json"
@@ -50,12 +53,17 @@ if ($ResolvePathsOnly) {
 }
 
 Write-Output "Olivia Soul version: $version (fixed)"
-$stage = Join-Path $project "dist-native\stage"
+if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
+    $WorkDirectory = Join-Path $project ("dist-native\package-work\" + [Guid]::NewGuid().ToString("N"))
+}
+$stage = Join-Path $WorkDirectory "stage"
 $nodeVersion = "22.22.0"
 $nodeArchiveName = "node-v$nodeVersion-win-x64.zip"
 $nodeArchive = Join-Path $downloadCache $nodeArchiveName
 $nodeUrl = "https://nodejs.org/dist/v$nodeVersion/$nodeArchiveName"
 $nodeChecksums = Join-Path $downloadCache "node-v$nodeVersion-SHASUMS256.txt"
+$nodeArchiveSha256 = "c97fa376d2becdc8863fcd3ca2dd9a83a9f3468ee7ccf7a6d076ec66a645c77a"
+$nodeExeSha256 = "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb"
 $webViewBootstrapper = Join-Path $downloadCache "MicrosoftEdgeWebview2Setup.exe"
 $webViewUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 $whisperVersion = "v1.9.2"
@@ -63,6 +71,7 @@ $whisperArchiveName = "whisper-bin-x64.zip"
 $whisperArchive = Join-Path $downloadCache "$whisperVersion-$whisperArchiveName"
 $whisperUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/$whisperVersion/$whisperArchiveName"
 $whisperSha256 = "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a"
+$whisperTalkLlamaExeSha256 = "31dbb055479cde7d05919dcabfdb7aa792f0fbb46c848e50f44aa8688c47801e"
 $whisperModel = Join-Path $downloadCache "ggml-small.bin"
 $whisperModelUrls = @(
     "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
@@ -74,6 +83,8 @@ $ffmpegArchiveName = "ffmpeg-n9.0.1-6-g9d4ca21220-win64-lgpl-9.0.zip"
 $ffmpegArchive = Join-Path $downloadCache $ffmpegArchiveName
 $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ffmpegRelease/$ffmpegArchiveName"
 $ffmpegSha256 = "2a78472df18a88405bfd2cbbce729ff0179bae4b0a13afc43f26d409eb822496"
+$ffmpegExeSha256 = "b25445154b6f77e46f321b0de49a3d9fe4a462a5fdb7765c1ff4a9ce9950f44e"
+$ffprobeExeSha256 = "beec24941e9d77db32e6ce6b21731575e18c92dff4d7c04988e0d115021a8259"
 
 function Ensure-Directory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null }
@@ -144,6 +155,90 @@ if ($ChecksumOnly) {
     exit 0
 }
 
+# Fail before touching output or building. Existing output is never deleted.
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+$WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
+$stage = Join-Path $WorkDirectory "stage"
+Assert-EmptyPackageDirectory -Path $OutputDirectory -ProtectedRoots @($project, $repository)
+Assert-EmptyPackageDirectory -Path $WorkDirectory -ProtectedRoots @($project, $repository)
+if ($WorkDirectory.TrimEnd('\') -eq $OutputDirectory.TrimEnd('\') -or
+    $WorkDirectory.StartsWith($OutputDirectory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $OutputDirectory.StartsWith($WorkDirectory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Package output and work directories must be separate, non-overlapping directories"
+}
+
+$forbiddenPackageValues = @(
+    $env:USERPROFILE,
+    $env:APPDATA,
+    $env:LOCALAPPDATA,
+    $repository,
+    $project,
+    $PSScriptRoot,
+    $WorkDirectory,
+    $OutputDirectory,
+    $buildTools,
+    $downloadCache
+) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+if (-not [string]::IsNullOrWhiteSpace($env:OLIVIA_SOUL_PRIVATE_ROOTS)) {
+    $forbiddenPackageValues += @($env:OLIVIA_SOUL_PRIVATE_ROOTS -split [IO.Path]::PathSeparator) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+}
+$forbiddenPackageValues = @($forbiddenPackageValues | Select-Object -Unique)
+$trustedStageFiles = @{
+    "runtime/node.exe" = $nodeExeSha256
+    "runtime/whisper/whisper-talk-llama.exe" = $whisperTalkLlamaExeSha256
+    "runtime/whisper/ggml-small.bin" = $whisperModelSha256
+    "runtime/ffmpeg/bin/ffmpeg.exe" = $ffmpegExeSha256
+    "runtime/ffmpeg/bin/ffprobe.exe" = $ffprobeExeSha256
+}
+
+function Copy-ZipEntry([string]$Archive, [string]$EntryName, [string]$Destination) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $entry = $zip.GetEntry($EntryName)
+        if (-not $entry) { $entry = $zip.GetEntry($EntryName.Replace('/', '\')) }
+        if (-not $entry) { throw "Required archive entry is missing: $EntryName" }
+        Ensure-Directory (Split-Path $Destination -Parent)
+        $inputStream = $entry.Open()
+        try {
+            $outputStream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew)
+            try { $inputStream.CopyTo($outputStream) }
+            finally { $outputStream.Dispose() }
+        }
+        finally { $inputStream.Dispose() }
+    }
+    finally { $zip.Dispose() }
+}
+
+function Copy-ReviewGuides([string]$Source, [string]$Stage, [string]$Output = "") {
+    foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
+        Copy-PublicFile (Join-Path $Source $name) (Join-Path $Stage $name)
+        if (-not [string]::IsNullOrWhiteSpace($Output)) {
+            Copy-PublicFile (Join-Path $Source $name) (Join-Path $Output $name)
+        }
+    }
+}
+
+function Copy-WebViewNotices([string]$ProjectFile, [string]$NugetRoot, [string]$Stage) {
+    [xml]$definition = [IO.File]::ReadAllText($ProjectFile)
+    $references = @($definition.Project.ItemGroup.PackageReference | Where-Object { $_.Include -eq "Microsoft.Web.WebView2" })
+    if ($references.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$references[0].Version)) {
+        throw "Cannot resolve the WebView2 SDK version for license staging"
+    }
+    $sdk = Join-Path $NugetRoot ("microsoft.web.webview2\" + [string]$references[0].Version)
+    foreach ($name in @("LICENSE.txt", "NOTICE.txt")) {
+        Copy-PublicFile (Join-Path $sdk $name) (Join-Path $Stage "licenses\WebView2\$name")
+    }
+}
+
+function Copy-SteamLauncherPayload([string]$Source, [string]$Compiled, [string]$Destination) {
+    foreach ($name in @("README.md", "configure.ps1", "steam-launch-options.mjs")) {
+        Copy-PublicFile (Join-Path $Source $name) (Join-Path $Destination $name)
+    }
+    Copy-PublicFile (Join-Path $Compiled "OliviaSteamWaiter.exe") (Join-Path $Destination "OliviaSteamWaiter.exe")
+}
+Ensure-Directory $WorkDirectory
 Ensure-Directory $downloadCache
 Ensure-Directory $env:DOTNET_CLI_HOME
 Ensure-Directory $env:NUGET_PACKAGES
@@ -159,12 +254,13 @@ $runningHost = Get-Process OliviaSoul -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $builtHost }
 if ($runningHost) {
     if (Test-Path -LiteralPath $builtHost) {
-        Start-Process -FilePath $builtHost -ArgumentList "--quit" -Wait
-        Start-Sleep -Milliseconds 500
+        throw "Source build host is running; close it yourself before packaging: $builtHost"
     }
 }
 
-& $DotNet build (Join-Path $project "native-host\OliviaSoul.csproj") -c Release
+$nativeOutput = Join-Path $WorkDirectory "native-output"
+$nativeIntermediate = (Join-Path $WorkDirectory "native-obj") + [IO.Path]::DirectorySeparatorChar
+& $DotNet build (Join-Path $project "native-host\OliviaSoul.csproj") -c Release -o $nativeOutput "-p:IntermediateOutputPath=$nativeIntermediate" -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) { throw "原生宿主编译失败" }
 
 if (-not (Test-Path -LiteralPath $nodeArchive)) {
@@ -176,8 +272,9 @@ if (-not (Test-Path -LiteralPath $nodeChecksums)) {
 $checksumLine = Get-Content -LiteralPath $nodeChecksums | Where-Object { $_ -match [regex]::Escape($nodeArchiveName) + '$' } | Select-Object -First 1
 if (-not $checksumLine) { throw "未找到 Node.js 官方校验值" }
 $expectedHash = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+if ($expectedHash -ne $nodeArchiveSha256) { throw "Node.js 官方校验清单与固定版本不一致" }
 $actualHash = (Get-Sha256Hash $nodeArchive).ToLowerInvariant()
-if ($actualHash -ne $expectedHash) { throw "Node.js 下载包 SHA-256 校验失败" }
+if ($actualHash -ne $nodeArchiveSha256) { throw "Node.js 下载包 SHA-256 校验失败" }
 
 if (-not (Test-Path -LiteralPath $webViewBootstrapper)) {
     Invoke-WebRequest -UseBasicParsing -Uri $webViewUrl -OutFile $webViewBootstrapper
@@ -216,10 +313,9 @@ if (-not (Test-Path -LiteralPath $ffmpegArchive)) {
 $ffmpegActualHash = (Get-Sha256Hash $ffmpegArchive).ToLowerInvariant()
 if ($ffmpegActualHash -ne $ffmpegSha256) { throw "FFmpeg 下载包 SHA-256 校验失败" }
 
-Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 Ensure-Directory $stage
+Copy-WebViewNotices -ProjectFile $nativeProjectPath -NugetRoot $env:NUGET_PACKAGES -Stage $stage
 
-$nativeOutput = Join-Path $project "native-host\bin\Release\net462"
 Get-ChildItem -LiteralPath $nativeOutput -File | Where-Object {
     $_.Extension -in @(".exe", ".dll", ".config")
 } | Copy-Item -Destination $stage -Force
@@ -228,15 +324,14 @@ Copy-PublicFile (Join-Path $PSScriptRoot "app.ico") (Join-Path $stage "app.ico")
 Copy-PublicFile (Join-Path $PSScriptRoot "app.ico") (Join-Path $stage "app-v9.ico")
 Copy-PublicFile $webViewBootstrapper (Join-Path $stage "redist\MicrosoftEdgeWebview2Setup.exe")
 
-$nodeExtract = Join-Path $project "dist-native\node"
-Remove-Item -LiteralPath $nodeExtract -Recurse -Force -ErrorAction SilentlyContinue
-Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeExtract -Force
-$nodeRoot = Join-Path $nodeExtract "node-v$nodeVersion-win-x64"
-Copy-PublicFile (Join-Path $nodeRoot "node.exe") (Join-Path $stage "runtime\node.exe")
-Copy-PublicFile (Join-Path $nodeRoot "LICENSE") (Join-Path $stage "runtime\NODE-LICENSE.txt")
+$nodePrefix = "node-v$nodeVersion-win-x64"
+Copy-ZipEntry -Archive $nodeArchive -EntryName "$nodePrefix/node.exe" -Destination (Join-Path $stage "runtime\node.exe")
+Copy-ZipEntry -Archive $nodeArchive -EntryName "$nodePrefix/LICENSE" -Destination (Join-Path $stage "runtime\NODE-LICENSE.txt")
+if ((Get-Sha256Hash (Join-Path $stage "runtime\node.exe")).ToLowerInvariant() -ne $nodeExeSha256) {
+    throw "Node.js 运行时 SHA-256 校验失败"
+}
 
-$whisperExtract = Join-Path $project "dist-native\whisper"
-Remove-Item -LiteralPath $whisperExtract -Recurse -Force -ErrorAction SilentlyContinue
+$whisperExtract = Join-Path $WorkDirectory "extract-whisper"
 Expand-Archive -LiteralPath $whisperArchive -DestinationPath $whisperExtract -Force
 $whisperCli = Get-ChildItem -LiteralPath $whisperExtract -Filter "whisper-cli.exe" -File -Recurse | Select-Object -First 1
 if (-not $whisperCli) { throw "whisper.cpp 下载包结构不正确" }
@@ -245,16 +340,24 @@ Ensure-Directory (Join-Path $stage "runtime\whisper")
 Copy-Item -Path (Join-Path $whisperRuntime "*") -Destination (Join-Path $stage "runtime\whisper") -Recurse -Force
 Copy-PublicFile (Join-Path $project "packaging\WHISPER-CPP-LICENSE.txt") (Join-Path $stage "runtime\whisper\LICENSE.txt")
 Copy-PublicFile $whisperModel (Join-Path $stage "runtime\whisper\ggml-small.bin")
+$whisperTalkLlama = Join-Path $stage "runtime\whisper\whisper-talk-llama.exe"
+if (-not (Test-Path -LiteralPath $whisperTalkLlama -PathType Leaf) -or
+    (Get-Sha256Hash $whisperTalkLlama).ToLowerInvariant() -ne $whisperTalkLlamaExeSha256) {
+    throw "whisper.cpp 运行时 SHA-256 校验失败"
+}
 
-$ffmpegExtract = Join-Path $project "dist-native\ffmpeg"
-Remove-Item -LiteralPath $ffmpegExtract -Recurse -Force -ErrorAction SilentlyContinue
+$ffmpegExtract = Join-Path $WorkDirectory "extract-ffmpeg"
 Expand-Archive -LiteralPath $ffmpegArchive -DestinationPath $ffmpegExtract -Force
 $ffmpegRoot = Get-ChildItem -LiteralPath $ffmpegExtract -Directory | Select-Object -First 1
 if (-not $ffmpegRoot) { throw "FFmpeg 下载包结构不正确" }
 Copy-PublicFile (Join-Path $ffmpegRoot.FullName "bin\ffmpeg.exe") (Join-Path $stage "runtime\ffmpeg\bin\ffmpeg.exe")
+Copy-PublicFile (Join-Path $ffmpegRoot.FullName "bin\ffprobe.exe") (Join-Path $stage "runtime\ffmpeg\bin\ffprobe.exe")
 Copy-PublicFile (Join-Path $ffmpegRoot.FullName "LICENSE.txt") (Join-Path $stage "runtime\ffmpeg\LICENSE.txt")
 
-foreach ($name in @("server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js")) {
+foreach ($name in @(
+    "server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js",
+    "data-migration.js", "storage-paths.js", "storage-migration.js"
+)) {
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
 }
 Copy-PublicFile (Join-Path $project "package.json") (Join-Path $stage "app\package.json")
@@ -263,9 +366,29 @@ if (Test-Path -LiteralPath $nodeModules) {
     Copy-Item -LiteralPath $nodeModules -Destination (Join-Path $stage "app\node_modules") -Recurse -Force
 }
 Copy-Item -LiteralPath (Join-Path $project "public") -Destination (Join-Path $stage "app\public") -Recurse -Force
-foreach ($name in @("controller.js", "node-host.js", "startup-task.ps1")) {
+Ensure-Directory (Join-Path $stage "app\midi")
+foreach ($name in @(
+    "store.js", "routes.js", "song-metadata.js", "song-preview-source.js", "song-name-corrections.js",
+    "playback-clock.js", "library-importer.js", "library-watch.js", "media-probe.js", "duration-repair.js",
+    "process-runner.js", "catalog-manifest.js", "catalog-relink.js"
+)) {
+    Copy-Item -LiteralPath (Join-Path (Join-Path $project "midi") $name) -Destination (Join-Path $stage "app\midi") -Force
+}
+foreach ($name in @(
+    "controller.js",
+    "node-host.js",
+    "workspace-template.js",
+    "client-backups.js",
+    "client-execution.js",
+    "client-patch-registry.js",
+    "uninstall-restore.js",
+    "startup-task.ps1"
+)) {
     Copy-PublicFile (Join-Path $project "desktop\$name") (Join-Path $stage "app\desktop\$name")
 }
+
+# Official finished MP4 files are validated with the packaged FFmpeg tools.
+# The release intentionally excludes Godot, FluidSynth, SoundFont and MIDI rendering bootstrap files.
 
 $scriptTarget = Join-Path $stage "resources\workspace-template\.cursor\skills\fit-letters\scripts"
 foreach ($name in @("deepseek-reply.ps1", "harness-live.ps1", "harness-4step.ps1", "history-retrieval.ps1", "refresh-live-memory.ps1", "memory-lib.ps1", "ds-call.ps1", "model-call.ps1", "score-temp.ps1", "sqlite-memory-load.cjs")) {
@@ -275,15 +398,38 @@ Copy-PublicFile (Join-Path $repository "林离人设.md") (Join-Path $stage "res
 foreach ($name in @("VERSION", "00-栏目.md", "01-预检.md", "01-初始化账本.md", "02-历史检索.md", "02-账本校正.md", "03-中段生成.md", "04-尾端检查.md", "05-反馈重写.md", "开信.md", "写法.md")) {
     Copy-PublicFile (Join-Path $repository "harness\$name") (Join-Path $stage "resources\workspace-template\harness\$name")
 }
-foreach ($name in @("patch-feapp-local.ps1", "restore-feapp-original.ps1", "get-feapp-status.ps1", "process-control.ps1")) {
+foreach ($name in @("patch-feapp-local.ps1", "patch-feapp-locale-local.ps1", "upgrade-feapp-v14-v16.ps1", "upgrade-feapp-v16-v17.ps1", "upgrade-feapp-v22-v23.ps1", "restore-feapp-original.ps1", "get-feapp-status.ps1", "patch-webplayer-local.ps1", "upgrade-webplayer-v6-v7.ps1", "restore-webplayer-original.ps1", "get-webplayer-status.ps1", "process-control.ps1")) {
     Copy-PublicFile (Join-Path $repository "tools\$name") (Join-Path $stage "resources\workspace-template\tools\$name")
 }
+Copy-PublicFile (Join-Path $project "public\song-editor.js") (Join-Path $stage "resources\workspace-template\tools\song-editor.js")
 
-Remove-Item -LiteralPath $OutputDirectory -Recurse -Force -ErrorAction SilentlyContinue
-Ensure-Directory $OutputDirectory
-$portable = Join-Path $OutputDirectory "OliviaSoul-$version-Portable.zip"
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $portable -CompressionLevel Optimal
-Copy-PublicFile (Join-Path $PSScriptRoot "使用说明.txt") (Join-Path $OutputDirectory "使用说明.txt")
+Assert-EmptyPackageDirectory -Path $OutputDirectory -ProtectedRoots @($project, $repository)
+$steamSource = Join-Path $repository "tools\steam-launcher"
+$steamOutput = Join-Path $WorkDirectory "steam-waiter-output"
+# Compile only; never configure Steam or execute either application during packaging.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $steamSource "build.ps1") -OutputDirectory $steamOutput
+if ($LASTEXITCODE -ne 0) { throw "Steam waiter compilation failed" }
+Copy-SteamLauncherPayload -Source $steamSource -Compiled $steamOutput -Destination (Join-Path $stage "resources\workspace-template\tools\steam-launcher")
+Copy-ReviewGuides -Source $PSScriptRoot -Stage $stage
+
+# Freeze the complete audited stage. Portable and Setup are both produced only from this snapshot.
+$frozenStage = Join-Path $WorkDirectory "frozen-stage"
+$frozenReceipt = New-AuditedPackageSnapshot `
+    -SourceStage $stage `
+    -SnapshotStage $frozenStage `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles
+$frozenStageFingerprint = $frozenReceipt.Fingerprint
+$portableCandidate = Join-Path $WorkDirectory "OliviaSoul-$version-Portable.candidate.zip"
+$auditedArtifactDirectory = Join-Path $WorkDirectory "audited-artifacts"
+$auditedPortable = Join-Path $auditedArtifactDirectory "OliviaSoul-$version-Portable.zip"
+$portableReceipt = Publish-AuditedPackageArchive `
+    -Stage $frozenStage `
+    -CandidateArchive $portableCandidate `
+    -DestinationArchive $auditedPortable `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles `
+    -ExpectedStageFingerprint $frozenStageFingerprint
 
 if ([string]::IsNullOrWhiteSpace($Iscc)) {
     $candidates = @(@(
@@ -295,11 +441,76 @@ if ([string]::IsNullOrWhiteSpace($Iscc)) {
     $Iscc = $candidates[0]
 }
 
+$installerSource = Join-Path $PSScriptRoot "OliviaSoul.iss"
+$installerSourceHash = Assert-PublicPackageFile -Path $installerSource -RelativePath "packaging/OliviaSoul.iss" -ForbiddenValues $forbiddenPackageValues
+$installerSnapshot = Join-Path $WorkDirectory "installer-source\OliviaSoul.iss"
+Copy-VerifiedPackageFile -Source $installerSource -Destination $installerSnapshot -ExpectedSha256 $installerSourceHash
+$installerOutputDirectory = Join-Path $WorkDirectory "installer-output"
+Ensure-Directory $installerOutputDirectory
 $env:OLIVIA_SOUL_VERSION = $version
-$env:OLIVIA_SOUL_STAGE = $stage
-$env:OLIVIA_SOUL_OUTPUT = $OutputDirectory
-& $Iscc (Join-Path $PSScriptRoot "OliviaSoul.iss")
-if ($LASTEXITCODE -ne 0) { throw "Inno Setup 打包失败" }
+$env:OLIVIA_SOUL_STAGE = $frozenStage
+$env:OLIVIA_SOUL_OUTPUT = $installerOutputDirectory
+$installerCompileScript = Join-Path $WorkDirectory "installer-source\OliviaSoul.compile.iss"
+$installerCompileReceipt = New-AuditedInstallerCompileScript `
+    -TemplateScript $installerSnapshot `
+    -OutputScript $installerCompileScript `
+    -Stage $frozenStage `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles `
+    -ExpectedStageFingerprint $frozenStageFingerprint
+Assert-AuditedInstallerSource `
+    -InstallerScript $installerCompileScript `
+    -Stage $frozenStage `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles `
+    -ExpectedStageFingerprint $frozenStageFingerprint `
+    -RequireEnvironmentBinding `
+    -RequireExplicitSources
+Invoke-AuditedInstallerCompiler `
+    -InstallerScript $installerCompileScript `
+    -Stage $frozenStage `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles `
+    -ExpectedStageFingerprint $frozenStageFingerprint `
+    -RequireEnvironmentBinding `
+    -RequireExplicitSources `
+    -Compiler {
+        param($auditedInstallerScript)
+        & $Iscc $auditedInstallerScript
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup 打包失败" }
+    }
+Assert-AuditedInstallerSource `
+    -InstallerScript $installerCompileScript `
+    -Stage $frozenStage `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $trustedStageFiles `
+    -ExpectedStageFingerprint $frozenStageFingerprint `
+    -RequireEnvironmentBinding `
+    -RequireExplicitSources
+$setupCandidate = Join-Path $installerOutputDirectory "OliviaSoul-$version-Setup.exe"
+$setupHash = Assert-PublicPackageFile -Path $setupCandidate -RelativePath "OliviaSoul-$version-Setup.exe" -ForbiddenValues $forbiddenPackageValues
 
-Write-ReleaseChecksums $OutputDirectory
+$releaseCandidateDirectory = Join-Path $WorkDirectory "release-candidate"
+Ensure-Directory $releaseCandidateDirectory
+Copy-VerifiedPackageFile -Source $auditedPortable -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Portable.zip") -ExpectedSha256 $portableReceipt.ArchiveSha256
+Copy-VerifiedPackageFile -Source $setupCandidate -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Setup.exe") -ExpectedSha256 $setupHash
+foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
+    $guideManifestValue = [string]$frozenReceipt.Manifest[$name]
+    if ([string]::IsNullOrWhiteSpace($guideManifestValue)) { throw "冻结发布说明缺失：$name" }
+    $guideHash = $guideManifestValue.Split(':', 2)[1]
+    Copy-VerifiedPackageFile -Source (Join-Path $frozenStage $name) -Destination (Join-Path $releaseCandidateDirectory $name) -ExpectedSha256 $guideHash
+}
+$releaseTrustedFiles = @{
+    "OliviaSoul-$version-Portable.zip" = $portableReceipt.ArchiveSha256
+    "OliviaSoul-$version-Setup.exe" = $setupHash
+}
+Write-ReleaseChecksums $releaseCandidateDirectory
+$releaseManifest = Get-PublicPackageTreeManifest -Path $releaseCandidateDirectory -ForbiddenValues $forbiddenPackageValues -TrustedFiles $releaseTrustedFiles
+$releaseFingerprint = Get-PackageManifestFingerprint $releaseManifest
+Publish-VerifiedReleaseDirectory `
+    -CandidateDirectory $releaseCandidateDirectory `
+    -OutputDirectory $OutputDirectory `
+    -ExpectedFingerprint $releaseFingerprint `
+    -ForbiddenValues $forbiddenPackageValues `
+    -TrustedFiles $releaseTrustedFiles
 Write-Output "Olivia Soul release: $OutputDirectory"

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { createOliviaService, validateHarnessReply } from "../server.js";
@@ -16,6 +16,7 @@ import {
 } from "../remote-memory.js";
 import { prepareSoulBundle } from "../soul-bundle.js";
 import { parseFfmpegProgress, parseWhisperProgress, TranscriptionEngine } from "../transcription.js";
+import { blockedFetchPorts } from "./fixtures/fetch-ports.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,14 @@ async function fixture(options = {}) {
   const root = await mkdtemp(join(tmpdir(), "olivia-local-test-"));
   await mkdir(join(root, "信件往来"));
   await mkdir(join(root, "信件往来_原始语料"));
+  let songStoragePath = "";
+  let usersettingsPath;
+  if (options.storage === true) {
+    songStoragePath = join(root, "song-storage");
+    usersettingsPath = join(root, "usersettings.dat");
+    await mkdir(songStoragePath, { recursive: true });
+    await writeFile(usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(songStoragePath)}`));
+  }
   const service = await createOliviaService({
     root,
     dataDir: join(root, "data"),
@@ -35,10 +44,26 @@ async function fixture(options = {}) {
     transcriptionEngine: options.transcriptionEngine,
     readOfficialRequestContext: options.readOfficialRequestContext,
     remoteBase: options.remoteBase,
+    updateDataRoot: options.updateDataRoot ?? join(root, "updates"),
+    updateCurrentTag: options.updateCurrentTag,
+    updateRepository: options.updateRepository,
     worker: options.worker ?? false,
-    dailyLetterLimit: Object.hasOwn(options, "dailyLetterLimit") ? options.dailyLetterLimit : 3,
+    dailyLetterLimit: Object.hasOwn(options, "dailyLetterLimit") ? options.dailyLetterLimit : undefined,
+    usersettingsPath,
+    storagePollIntervalMs: options.storagePollIntervalMs,
+    deferStorageRefresh: options.deferStorageRefresh,
+    beforeStorageMigration: options.beforeStorageMigration,
+    beforeStorageCopy: options.beforeStorageCopy,
+    legacyDatabasePaths: options.legacyDatabasePaths,
+    legacyArchiveDirs: options.legacyArchiveDirs,
+    legacyWorkspaceRoots: options.legacyWorkspaceRoots,
+    allowLegacyModelConfigImport: options.allowLegacyModelConfigImport,
   });
-  const address = await service.listen(0);
+  let address = await service.listen(0);
+  while (blockedFetchPorts.has(address.port)) {
+    await new Promise(resolve => service.server.close(resolve));
+    address = await service.listen(0);
+  }
   const base = `http://127.0.0.1:${address.port}`;
   let cookie = "";
   async function request(path, init = {}) {
@@ -56,6 +81,8 @@ async function fixture(options = {}) {
   }
   return {
     root,
+    songStoragePath,
+    usersettingsPath,
     service,
     request,
     async close() {
@@ -247,10 +274,17 @@ test("逐封摘要保持独立请求且最多八并发", async () => {
   }
 });
 
-test("客户端原版备份按游戏版本隔离", async () => {
+test("客户端原版备份按游戏版本隔离", async t => {
   const root = await mkdtemp(join(tmpdir(), "olivia-client-backup-test-"));
   const appData = join(root, "app-data");
   await mkdir(appData);
+  const previousAppData = process.env.APPDATA;
+  process.env.APPDATA = join(root, "isolated-roaming");
+  await mkdir(process.env.APPDATA);
+  t.after(() => {
+    if (previousAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = previousAppData;
+  });
   const controller = new DesktopController({
     root,
     dataDir: join(root, "data"),
@@ -258,21 +292,38 @@ test("客户端原版备份按游戏版本隔离", async () => {
     executable: join(root, "OliviaSoul.exe"),
     onPortChanged() {},
   });
-  controller.readFeappStatus = async () => ({ mounted: false, port: null });
+  controller.readFeappStatus = controller.readWebplayerStatus = async () => ({
+    clientFound: true, mounted: false, managed: false, updateAvailable: false, port: null,
+  });
   const gameRoot = join(root, "game");
+  const archiveRoot = join(root, "archive-fixture"), archivePath = join(root, "clean.zip");
+  await mkdir(join(archiveRoot, "assets"), { recursive: true });
+  await writeFile(join(archiveRoot, "assets", "main-build.js"), "clean-main");
+  await writeFile(join(archiveRoot, "assets", "style.css"), "clean-style");
+  await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    `Compress-Archive -LiteralPath '${archiveRoot.replaceAll("'", "''")}\\assets' -DestinationPath '${archivePath.replaceAll("'", "''")}'`]);
+  const cleanArchive = await readFile(archivePath);
+  for (const version of ["0.0.9.615", "0.0.9.627"]) {
+    const resources = join(gameRoot, version, "resources");
+    await mkdir(resources, { recursive: true });
+    await writeFile(join(resources, "feapp.dat"), cleanArchive);
+    await writeFile(join(resources, "webplayer.dat"), cleanArchive);
+  }
   const oldBackup = await controller.originalFeapp({
     gameRoot,
     version: "0.0.9.615",
     feappPath: join(gameRoot, "0.0.9.615", "resources", "feapp.dat"),
+    webplayerPath: join(gameRoot, "0.0.9.615", "resources", "webplayer.dat"),
   }, true);
   const newBackup = await controller.originalFeapp({
     gameRoot,
     version: "0.0.9.627",
     feappPath: join(gameRoot, "0.0.9.627", "resources", "feapp.dat"),
+    webplayerPath: join(gameRoot, "0.0.9.627", "resources", "webplayer.dat"),
   }, true);
   assert.notEqual(oldBackup, newBackup);
-  assert.match(oldBackup, /client-backups[\\/][a-f0-9]{32}\.feapp\.dat$/u);
-  assert.match(newBackup, /client-backups[\\/][a-f0-9]{32}\.feapp\.dat$/u);
+  assert.match(oldBackup, /client-backups[\\/]resources-only[\\/][a-f0-9]{32}[\\/][a-f0-9]{32}\.feapp\.dat$/u);
+  assert.match(newBackup, /client-backups[\\/]resources-only[\\/][a-f0-9]{32}[\\/][a-f0-9]{32}\.feapp\.dat$/u);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -382,12 +433,16 @@ test("独立客户端复制后逐文件哈希一致且拒绝覆盖源目录", as
   }
 });
 
-test("挂载补丁会恢复离线信件、音乐入口和音乐功能", async () => {
+test("挂载补丁会恢复离线信件、音乐和我的上传但保持 MIDI 定制卡隐藏", async () => {
   const patchScript = await readFile(new URL("../../tools/patch-feapp-local.ps1", import.meta.url), "utf8");
+  assert.match(patchScript, /\[switch\]\$RefreshOriginal/u);
+  assert.match(patchScript, /\[switch\]\$PatchNativeOfflineChecks/u);
+  assert.match(patchScript, /if \(\$RefreshOriginal\) \{/u);
+  assert.match(patchScript, /if \(\$PatchNativeOfflineChecks\) \{/u);
   assert.match(patchScript, /\$mailboxDisabled = 'N3=!1,Ss=!1,wa=\(\{onComplete'/u);
   assert.match(patchScript, /\$mailboxEnabled = 'N3=!0,Ss=!1,wa=\(\{onComplete'/u);
   assert.match(patchScript, /\$offlineWidgetsEnabled = 'l\.value\.mailWidget=!0,l\.value\.musicWidget=!0'/u);
-  assert.match(patchScript, /\$musicFeaturesEnabled = 'N3=!0,Ss=!0,wa=\(\{onComplete'/u);
+  assert.doesNotMatch(patchScript, /\$musicFeaturesEnabled|N3=!0,Ss=!0,wa=\(\{onComplete/u);
   assert.match(patchScript, /\$playlistShown = '\(r\(\),_\(se,\{key:0\},\[o\(a\)\?\(r\(\),_\("div",c4,'/u);
   assert.match(patchScript, /\$hideActionsTo = '"hide-actions":!1'/u);
   assert.match(patchScript, /\$offlineRequestAllow = 'if\(!1\)throw new Ol\(e\)'/u);
@@ -402,23 +457,625 @@ test("挂载补丁会恢复离线信件、音乐入口和音乐功能", async ()
   assert.match(patchScript, /videoUrl:e\.videoUrl\?\?e\.mediaUrl/u);
   assert.match(patchScript, /videoByTodView:e\.videoByTodView\?\?i\.videoByTodView/u);
   assert.match(patchScript, /if\(w\.value\)\{await W\(\)\.finally/u);
-  assert.match(patchScript, /patched archive still skips offline playlist fetch/u);
-  assert.match(patchScript, /\$midiCardOfflineShown = 'o\(Ss\)\?\(r\(\),F\(Be,/u);
-  assert.match(patchScript, /patched archive still hides custom performance offline/u);
+  assert.match(patchScript, /offline My Upload mount flow was not upgraded to fetch the playlist/u);
+  assert.doesNotMatch(patchScript, /\$midiCardOfflineShown|patched archive still hides custom performance offline/u);
   assert.match(patchScript, /\$offlineStylesShown = 'D\.value=oe\.musicStyles'/u);
   assert.match(patchScript, /patched archive still filters offline music styles/u);
   assert.match(patchScript, /\$interfaceWatermarkHidden = 'Y\("",!0\)'/u);
   assert.match(patchScript, /patched archive still renders the interface uid watermark/u);
   assert.match(patchScript, /NutStudioUI\.dll/u);
   assert.match(patchScript, /NutContainerPlugin\.dll/u);
-  assert.match(patchScript, /lite-bar offline check/u);
+  // Native widget mutation and rollback are executed in native-widget-patch.test.js.
+  assert.match(patchScript, /nativeOfflineChecks=false/u);
   const restoreScript = await readFile(new URL("../../tools/restore-feapp-original.ps1", import.meta.url), "utf8");
   assert.match(restoreScript, /NutStudioUI-/u);
   assert.match(restoreScript, /NutContainerPlugin-/u);
   assert.match(patchScript, /patched archive still disables offline desktop widgets/u);
-  assert.match(patchScript, /patched archive still has mailbox or music features disabled/u);
+  assert.match(patchScript, /patched archive still hides the mailbox/u);
   assert.match(patchScript, /patched archive still hides the offline playlist/u);
   assert.match(patchScript, /patched archive still hides the write-letter entry/u);
+});
+
+test("存储状态使用游戏路径并在路径变化后原位刷新", async t => {
+  const ctx = await fixture({ storage: true, storagePollIntervalMs: 20 });
+  t.after(() => ctx.close());
+
+  const initial = await ctx.request("/admin/api/storage");
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.data.configuredPath, ctx.songStoragePath);
+  assert.equal(initial.body.data.activePath, ctx.songStoragePath);
+  assert.equal(initial.body.data.source, "game-settings");
+  assert.equal(initial.body.data.state, "ready");
+  assert.equal(initial.body.data.requiredBytes, 0);
+  assert.equal(initial.body.data.freeBytes, 0);
+  assert.equal(initial.body.data.error, null);
+  assert.ok(Number.isInteger(initial.body.data.revision));
+
+  const nextPath = join(ctx.root, "next-song-storage");
+  await mkdir(nextPath, { recursive: true });
+  await writeFile(ctx.usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(nextPath)}`));
+  const refreshed = await ctx.request("/admin/api/storage/refresh", { method: "POST", body: "{}" });
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.body.data.activePath, nextPath);
+  assert.ok(refreshed.body.data.revision > initial.body.data.revision);
+});
+
+test("存储摘要从数据库聚合作品和文件且路径刷新不自动迁移视频", async t => {
+  const ctx = await fixture({ storage: true, storagePollIntervalMs: 60_000 });
+  t.after(() => ctx.close());
+  const sourceRoot = join(ctx.root, "external-library");
+  const sourceVideo = join(sourceRoot, "official-source.mp4");
+  await mkdir(sourceRoot, { recursive: true });
+  await writeFile(sourceVideo, "REFERENCE-ONLY");
+  const song = ctx.service.midiStore.upsertUserSong({
+    name: "仅引用作品",
+    sourceKind: "official-import",
+    videoPath: sourceVideo,
+    durationUs: 1_000_000,
+    contentHash: "b".repeat(64),
+    externalRoot: sourceRoot,
+  });
+  const nextPath = join(ctx.root, "migration-target");
+  await mkdir(nextPath, { recursive: true });
+  await writeFile(ctx.usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(nextPath)}`));
+
+  const refreshed = await ctx.request("/admin/api/storage/refresh", { method: "POST", body: "{}" });
+  const current = ctx.service.midiStore.getUserSong(song.id);
+  assert.equal(ctx.service.midiStore.resolvePath(current.videoPath), sourceVideo);
+  assert.equal(await readFile(sourceVideo, "utf8"), "REFERENCE-ONLY");
+  const copiedFiles = await import("node:fs/promises").then(async ({ readdir }) => {
+    try { return await readdir(join(nextPath, "OliviaSoul", "我的上传"), { recursive: true }); }
+    catch (error) { if (error.code === "ENOENT") return []; throw error; }
+  });
+  assert.deepEqual(copiedFiles, []);
+  assert.equal(refreshed.body.data.workCount, 1);
+  assert.equal(refreshed.body.data.referencedFileCount, 1);
+  assert.equal(refreshed.body.data.referencedRootCount, 1);
+  assert.equal(refreshed.body.data.missingFileCount, null);
+  assert.deepEqual(refreshed.body.data.referencedRoots, [{
+    path: sourceRoot,
+    works: 1,
+    files: 1,
+    missing: null,
+  }]);
+  assert.equal(refreshed.body.data.state, "ready");
+});
+
+test("修改 songStoragePath 后视频回信继续读取旧路径且不自动复制", async t => {
+  const ctx = await fixture({ storage: true, storagePollIntervalMs: 20 });
+  t.after(() => ctx.close());
+  await ctx.request("/admin/api/memory/import", {
+    method: "POST",
+    body: JSON.stringify({ exchanges: [{ incoming: "迁移视频来信", reply: "迁移视频回信" }] }),
+  });
+  const letterId = (await ctx.request("/admin/api/memory")).body.data.exchanges[0].letterId;
+  const mp4 = Buffer.from("000000186674797069736f6d0000020069736f6d69736f32", "hex");
+  await ctx.request(`/admin/api/letters/${letterId}/video`, {
+    method: "POST",
+    headers: { "Content-Type": "video/mp4" },
+    body: mp4,
+  });
+  const filename = ctx.service.db.prepare("SELECT reply_video FROM letters WHERE id = ?").get(letterId).reply_video;
+  const oldFile = join(ctx.songStoragePath, "OliviaSoul", "视频回信", filename);
+  assert.deepEqual(await readFile(oldFile), mp4);
+
+  const nextPath = join(ctx.root, "moved-song-storage");
+  await mkdir(nextPath, { recursive: true });
+  await writeFile(ctx.usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(nextPath)}`));
+  const refreshed = await ctx.request("/admin/api/storage/refresh", { method: "POST", body: "{}" });
+  assert.equal(refreshed.body.data.activePath, nextPath);
+  const newFilename = ctx.service.db.prepare("SELECT reply_video FROM letters WHERE id = ?").get(letterId).reply_video;
+  await assert.rejects(readFile(join(nextPath, "OliviaSoul", "视频回信", newFilename)), /ENOENT/u);
+  assert.deepEqual(await readFile(oldFile), mp4, "来源文件必须保留");
+});
+
+test("修改 songStoragePath 后已登记官方作品保持原引用", async t => {
+  const ctx = await fixture({ storage: true });
+  t.after(() => ctx.close());
+  const oldPerformances = join(ctx.songStoragePath, "OliviaSoul", "我的上传");
+  const oldWork = join(oldPerformances, "legacy-work");
+  const oldVideo = join(oldWork, "TOD1730_NI_L.mp4");
+  await mkdir(oldWork, { recursive: true });
+  await writeFile(oldVideo, "OFFICIAL-VIDEO");
+  const song = ctx.service.midiStore.upsertUserSong({
+    name: "已登记官方作品",
+    sourceKind: "official-import",
+    videoPath: oldVideo,
+    videoByTodView: { TOD1730_NI_L: oldVideo },
+    durationUs: 12_000_000,
+    contentHash: "d".repeat(64),
+    externalRoot: oldPerformances,
+  });
+
+  const nextPath = join(ctx.root, "new-song-storage");
+  await mkdir(nextPath, { recursive: true });
+  await writeFile(ctx.usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(nextPath)}`));
+  const refreshed = await ctx.request("/admin/api/storage/refresh", { method: "POST", body: "{}" });
+  assert.equal(refreshed.body.data.activePath, nextPath);
+  const migrated = ctx.service.midiStore.getUserSong(song.id);
+  const newVideo = ctx.service.midiStore.resolvePath(migrated.videoPath);
+  assert.equal(newVideo, oldVideo);
+  assert.equal(await readFile(newVideo, "utf8"), "OFFICIAL-VIDEO");
+  assert.equal(await readFile(oldVideo, "utf8"), "OFFICIAL-VIDEO");
+});
+
+test("官方作品只有预览后明确确认才迁移", async t => {
+  const ctx = await fixture({ storage: true, storagePollIntervalMs: 60_000 });
+  t.after(() => ctx.close());
+  const sourceRoot = join(ctx.root, "consent-source");
+  const sourceVideo = join(sourceRoot, "official.mp4");
+  await mkdir(sourceRoot, { recursive: true });
+  await writeFile(sourceVideo, "CONSENT-VIDEO");
+  const song = ctx.service.midiStore.upsertUserSong({
+    name: "需确认迁移作品",
+    sourceKind: "official-import",
+    videoPath: sourceVideo,
+    videoByTodView: { DEFAULT: sourceVideo },
+    durationUs: 2_000_000,
+    contentHash: "c".repeat(64),
+    externalRoot: sourceRoot,
+  });
+
+  const started = await ctx.request("/admin/api/storage/migration/preview", {
+    method: "POST",
+    body: "{}",
+  });
+  assert.equal(started.status, 200);
+  assert.equal(started.body.data.state, "scanning");
+  assert.match(started.body.data.jobId, /\S/u);
+  let preview;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    preview = await ctx.request(`/admin/api/storage/migration/preview/${started.body.data.jobId}`);
+    if (preview.body.data.state === "ready") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(preview.body.data.state, "ready");
+  assert.equal(preview.body.data.files, 1);
+  assert.equal(ctx.service.midiStore.resolvePath(ctx.service.midiStore.getUserSong(song.id).videoPath), sourceVideo);
+
+  const denied = await ctx.request("/admin/api/storage/migration/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token: preview.body.data.token, confirmed: false }),
+  });
+  assert.equal(denied.status, 400);
+  assert.equal(ctx.service.midiStore.resolvePath(ctx.service.midiStore.getUserSong(song.id).videoPath), sourceVideo);
+
+  const confirmed = await ctx.request("/admin/api/storage/migration/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token: preview.body.data.token, confirmed: true }),
+  });
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.body.data.migrated, 1);
+  const migrated = ctx.service.midiStore.resolvePath(ctx.service.midiStore.getUserSong(song.id).videoPath);
+  assert.match(migrated, /song-storage[\\/]OliviaSoul[\\/]我的上传/u);
+  assert.equal(await readFile(migrated, "utf8"), "CONSENT-VIDEO");
+  assert.equal(await readFile(sourceVideo, "utf8"), "CONSENT-VIDEO");
+});
+
+test("写信成功后立即原子同步安装目录下的 Markdown", async t => {
+  const ctx = await fixture({ worker: false });
+  t.after(() => ctx.close());
+  await signIn(ctx);
+
+  const sent = await ctx.request("/toy/letter/send", {
+    method: "POST",
+    body: JSON.stringify({ content: "这封信必须在等待回信时就同步。" }),
+  });
+  assert.equal(sent.status, 200);
+
+  const archive = await readFile(join(ctx.root, "信件往来", "用户.md"), "utf8");
+  assert.match(archive, /这封信必须在等待回信时就同步。/u);
+  assert.match(archive, /等待回信/u);
+  const entries = await import("node:fs/promises").then(({ readdir }) => readdir(join(ctx.root, "信件往来")));
+  assert.deepEqual(entries, ["用户.md"]);
+});
+
+test("启动时备份目标数据库并去重合并旧信件", async t => {
+  const legacyRoot = await mkdtemp(join(tmpdir(), "olivia-legacy-db-"));
+  const legacyData = join(legacyRoot, "data");
+  const legacy = await createOliviaService({
+    root: legacyRoot,
+    dataDir: legacyData,
+    worker: false,
+    runMemoryRefresh: false,
+  });
+  const legacyUser = legacy.db.prepare("SELECT * FROM users LIMIT 1").get();
+  legacy.db.prepare(`
+    INSERT INTO letters(
+      id, user_id, person, content, status, reply_type, reply_text,
+      created_at, available_at, replied_at, is_read, source,
+      memory_order, letter_date, letter_time, reply_label, content_md5
+    ) VALUES('legacy-letter', ?, ?, '旧来信正文', 4, 1, '旧回信正文',
+      100, 100, 101, 1, 'import', 1, '2026-08-01', '12:00', '回信', 'legacy-md5')
+  `).run(legacyUser.id, legacyUser.person);
+  legacy.db.prepare("UPDATE settings SET value = '7' WHERE key = 'daily_letter_limit'").run();
+  legacy.db.prepare("UPDATE settings SET value = '旧昵称' WHERE key = 'offline_nickname'").run();
+  const legacyVideo = join(legacyRoot, "official.mp4");
+  await writeFile(legacyVideo, "OFFICIAL-MP4");
+  legacy.midiStore.upsertUserSong({
+    name: "旧库官方作品",
+    sourceKind: "import",
+    videoPath: legacyVideo,
+    durationUs: 12_000_000,
+    contentHash: "legacy-official-sha256",
+    videoByTodView: { DEFAULT: legacyVideo },
+    externalRoot: legacyRoot,
+  });
+  await legacy.close();
+
+  const target = await fixture({ legacyDatabasePaths: [join(legacyData, "olivia-local.sqlite")] });
+  t.after(async () => {
+    await target.close();
+    await rm(legacyRoot, { recursive: true, force: true });
+  });
+
+  const merged = target.service.db.prepare("SELECT * FROM letters WHERE id = 'legacy-letter'").get();
+  assert.equal(merged.content, "旧来信正文");
+  assert.equal(merged.reply_text, "旧回信正文");
+  assert.equal(target.service.db.prepare("SELECT value FROM settings WHERE key = 'daily_letter_limit'").get().value, "7");
+  assert.equal(target.service.db.prepare("SELECT value FROM settings WHERE key = 'offline_nickname'").get().value, "旧昵称");
+  assert.equal(target.service.db.prepare("SELECT person FROM users LIMIT 1").get().person, "旧昵称");
+  assert.equal(target.service.db.prepare("SELECT person FROM letters WHERE id = 'legacy-letter'").get().person, "旧昵称");
+  const migratedSong = target.service.midiStore.listPublishedUserSongs()
+    .find(song => song.name === "旧库官方作品");
+  assert.ok(migratedSong);
+  assert.equal(target.service.midiStore.resolvePath(migratedSong.videoPath), legacyVideo);
+  assert.equal(await readFile(legacyVideo, "utf8"), "OFFICIAL-MP4");
+  const backups = await import("node:fs/promises").then(({ readdir }) => readdir(join(target.root, "Backups")));
+  assert.equal(backups.length, 1);
+  assert.match(backups[0], /^before-legacy-merge-.*\.sqlite$/u);
+  assert.equal(target.service.db.prepare("PRAGMA quick_check").get().quick_check, "ok");
+});
+
+test("旧数据库缺失时从明确的旧 Markdown 档案目录恢复信件并去重", async t => {
+  const legacyRoot = await mkdtemp(join(tmpdir(), "olivia-legacy-markdown-"));
+  const archiveDir = join(legacyRoot, "信件往来");
+  await mkdir(archiveDir, { recursive: true });
+  await writeFile(join(archiveDir, "用户.md"), `# 往来 · 用户
+
+> 历史档案
+
+## 2026-08-02
+
+### 往来 01 · 09:30
+
+> 状态：已回信 · 已读
+
+#### 我（信件）
+
+只保留在旧 Markdown 中的来信
+
+#### 林离（回信）
+
+只保留在旧 Markdown 中的回信
+
+---
+`, "utf8");
+
+  const target = await fixture({ legacyArchiveDirs: [archiveDir] });
+  t.after(async () => {
+    await target.close();
+    await rm(legacyRoot, { recursive: true, force: true });
+  });
+
+  const restored = target.service.db.prepare("SELECT * FROM letters WHERE content = ?")
+    .get("只保留在旧 Markdown 中的来信");
+  assert.equal(restored.reply_text, "只保留在旧 Markdown 中的回信");
+  assert.equal(restored.status, 4);
+  assert.equal(restored.letter_date, "2026-08-02");
+  assert.equal(restored.letter_time, "09:30");
+  assert.equal(target.service.db.prepare("SELECT COUNT(*) count FROM letters WHERE content = ?")
+    .get("只保留在旧 Markdown 中的来信").count, 1);
+  assert.equal(await readFile(join(archiveDir, "用户.md"), "utf8").then(text => text.includes("历史档案")), true);
+  assert.equal(target.service.db.prepare("PRAGMA quick_check").get().quick_check, "ok");
+});
+
+test("普通启动不会从旧目录导入模型配置", async t => {
+  const legacyRoot = await mkdtemp(join(tmpdir(), "olivia-legacy-model-"));
+  await mkdir(join(legacyRoot, ".cursor", "secrets"), { recursive: true });
+  const oldConfig = "MODEL_ACTIVE_PROVIDER=local\nMODEL_LOCAL_BASE=http://127.0.0.1:9876/v1\nMODEL_LOCAL_MODEL=example-local\nMODEL_LOCAL_AUTH_MODE=none\nMODEL_LOCAL_API_KEY=\n";
+  await writeFile(join(legacyRoot, ".cursor", "secrets", "model.env"), oldConfig, "utf8");
+  await writeFile(join(legacyRoot, ".cursor", "secrets", "deepseek.env"), "DEEPSEEK_API_KEY=legacy-private-key\n", "utf8");
+
+  const target = await fixture({ legacyWorkspaceRoots: [legacyRoot] });
+  t.after(async () => {
+    await target.close();
+    await rm(legacyRoot, { recursive: true, force: true });
+  });
+  await assert.rejects(readFile(join(target.root, ".cursor", "secrets", "model.env")), error => error.code === "ENOENT");
+  await assert.rejects(readFile(join(target.root, ".cursor", "secrets", "deepseek.env")), error => error.code === "ENOENT");
+  const config = (await target.request("/admin/api/model")).body.data;
+  assert.equal(config.activeProvider, "deepseek");
+  assert.equal(config.profiles.local.baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(config.profiles.local.model, "local-model");
+  assert.equal(config.profiles.deepseek.keyConfigured, false);
+});
+
+test("显式授权可以导入缺失的旧模型配置且不覆盖当前配置", async t => {
+  const legacyRoot = await mkdtemp(join(tmpdir(), "olivia-approved-legacy-model-"));
+  await mkdir(join(legacyRoot, ".cursor", "secrets"), { recursive: true });
+  const oldConfig = "MODEL_ACTIVE_PROVIDER=local\nMODEL_LOCAL_BASE=http://127.0.0.1:9876/v1\nMODEL_LOCAL_MODEL=example-local\nMODEL_LOCAL_AUTH_MODE=none\nMODEL_LOCAL_API_KEY=\n";
+  await writeFile(join(legacyRoot, ".cursor", "secrets", "model.env"), oldConfig, "utf8");
+
+  const target = await fixture({
+    legacyWorkspaceRoots: [legacyRoot],
+    allowLegacyModelConfigImport: true,
+  });
+  t.after(async () => {
+    await rm(target.root, { recursive: true, force: true });
+    await rm(legacyRoot, { recursive: true, force: true });
+  });
+  assert.equal(await readFile(join(target.root, ".cursor", "secrets", "model.env"), "utf8"), oldConfig);
+
+  const currentConfig = "MODEL_ACTIVE_PROVIDER=deepseek\n";
+  await writeFile(join(target.root, ".cursor", "secrets", "model.env"), currentConfig, "utf8");
+  await target.service.close();
+  const reopened = await createOliviaService({
+    root: target.root,
+    dataDir: join(target.root, "data"),
+    legacyWorkspaceRoots: [legacyRoot],
+    allowLegacyModelConfigImport: true,
+    worker: false,
+    runMemoryRefresh: false,
+  });
+  await reopened.close();
+  assert.equal(await readFile(join(target.root, ".cursor", "secrets", "model.env"), "utf8"), currentConfig);
+});
+
+test("桌面更新安装器只接受数据目录 updates 下的 exe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-update-install-test-"));
+  const appData = join(root, "app-data");
+  const dataDir = join(root, "data");
+  const controller = new DesktopController({
+    root,
+    dataDir,
+    appData,
+    executable: join(root, "OliviaSoul.exe"),
+    onPortChanged() {},
+  });
+  const installer = join(dataDir, "updates", "2008.2.7-linli.3", "OliviaSoul-Setup.exe");
+  const outside = join(root, "outside.exe");
+  try {
+    await mkdir(dirname(installer), { recursive: true });
+    await writeFile(installer, "verified installer");
+    await writeFile(outside, "untrusted installer");
+    assert.deepEqual(await controller.prepareUpdateInstall(installer), { path: resolve(installer) });
+    await assert.rejects(controller.prepareUpdateInstall(outside), /只能安装/u);
+    await assert.rejects(controller.prepareUpdateInstall(join(dataDir, "updates", "note.txt")), /必须是 \.exe/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("客户端重新挂载使用已验证备份并保留播放器还原支持", async () => {
+  const source = await readFile(new URL("../desktop/controller.js", import.meta.url), "utf8");
+  assert.match(source, /Promise\.all\(\[\s*this\.readFeappStatus\(layout\.feappPath\), this\.readWebplayerStatus\(layout\.webplayerPath\)/u);
+  assert.match(source, /this\.originalClientBackups\(layout, true\)/u);
+  assert.doesNotMatch(source, /patchArgs\.push\("-RefreshOriginal"/u);
+  assert.match(source, /readWebplayerStatus\(layout\.webplayerPath\)/u);
+  assert.match(source, /patch-webplayer-local\.ps1/u);
+  assert.match(source, /restore-webplayer-original\.ps1/u);
+  assert.match(source, /webplayerMounted: Boolean\(webplayer\.mounted \|\| webplayer\.managed \|\| webplayer\.updateAvailable\)/u);
+});
+
+test("v28 客户端补丁终止旧会话并按播放模式推进播单", async () => {
+  const [patchScript, patchStatus, upgradeScript, v23UpgradeScript, localeScript, webplayerScript, webplayerUpgradeScript, controller] = await Promise.all([
+    readFile(new URL("../../tools/patch-feapp-local.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/get-feapp-status.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/upgrade-feapp-v16-v17.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/upgrade-feapp-v22-v23.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/patch-feapp-locale-local.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/patch-webplayer-local.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/upgrade-webplayer-v6-v7.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/controller.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(patchScript, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v25/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v24/u);
+  assert.match(upgradeScript, /OliviaSoulPatch:mail-music-v16/u);
+  assert.match(upgradeScript, /OliviaSoulPatch:mail-music-v18/u);
+  assert.match(upgradeScript, /OliviaSoulPatch:mail-music-v19/u);
+  assert.match(upgradeScript, /OliviaSoulPatch:mail-music-v21/u);
+  assert.match(upgradeScript, /OliviaSoulPatch:mail-music-v17/u);
+  assert.match(upgradeScript, /OliviaSoulUploadRevision===at\.revision/u);
+  assert.match(upgradeScript, /N3=!0,Ss=!0,wa=\(\{onComplete/u);
+  assert.match(upgradeScript, /N3=!0,Ss=!1,wa=\(\{onComplete/u);
+  assert.match(upgradeScript, /!o\(w\)&&o\(Ss\)\?\(r\(\),F\(Be,/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v14/u);
+  assert.match(patchStatus, /updateAvailable/u);
+  for (const endpoint of [
+    "/genObjectUploadUrl",
+    "/midi/generate",
+    "/midi/getGenerateResult",
+    "/midi/cancelGenerate",
+    "/midi/deleteJob",
+    "/midi/listJobs",
+    "/midi/batchGetResult",
+    "/midi/importShareCode",
+    "/deleteUserSong",
+    "/searchUserSongs",
+  ]) {
+    assert.match(patchScript, new RegExp(endpoint.replaceAll("/", "\\/"), "u"));
+    assert.match(patchStatus, new RegExp(endpoint.replaceAll("/", "\\/"), "u"));
+  }
+  assert.match(patchScript, /accept:"\.mid,\.midi"/u);
+  assert.match(patchScript, /midiAcceptExpectedCount\s*=\s*\$midiAcceptCount\s*\+\s*\$midiAcceptExistingCount/u);
+  assert.match(patchScript, /64\*1024\*1024/u);
+  assert.match(patchScript, /patched archive still hides My Upload offline/u);
+  assert.match(patchScript, /eventId:q\.eventId\?\?q\.id/u);
+  assert.match(patchScript, /patched archive drops My Upload eventId/u);
+  assert.doesNotMatch(patchScript, /downloadMap\.set\(Be\.id,\{\.\.\.f\.getDownloadEntry\(Be\.id\),progress:100,state:"completed"/u);
+  assert.match(patchScript, /\$myUploadNativeDownloadFrom\s*=\s*'const Dt=.*syncLocalStatus\(me\.map\(Le\)\)/u);
+  assert.match(patchScript, /\$myUploadLocalPlaybackTo\s*=\s*'const Dt=async\(\)=>\{\}'/u);
+  assert.match(patchScript, /\$playerCommandUrl\s*=\s*\$ServiceUrl\.TrimEnd/u);
+  assert.match(patchScript, /\$playerStateUrl\s*=\s*\$ServiceUrl\.TrimEnd/u);
+  assert.match(patchScript, /\$directControlFrom\s*=\s*'Ct=e=>We/u);
+  assert.match(patchScript, /cmd:"seek",offset:s\.position/u);
+  assert.match(patchScript, /OliviaSoulSongIdFromItem/u);
+  assert.match(patchScript, /OliviaSoulSongIdFromItem=B=>[\s\S]{0,240}decodeURIComponent/u);
+  assert.match(patchScript, /Bo=q=>\{Ro\(q\)\}/u);
+  assert.match(patchScript, /\/toy\/player-command/u);
+  assert.match(patchScript, /__OliviaSoulProgressPoll/u);
+  assert.match(patchScript, /__OliviaSoulApplyingProgress/u);
+  assert.match(patchScript, /applyLocalPlayerState/u);
+  assert.match(patchScript, /OliviaSoulBeginLocalPlayback/u);
+  assert.match(patchScript, /OliviaSoulBeginLocalPlayback\(\{\.\.\.B,videoUrl:ue\}\)/u,
+    "播放列表必须从实际媒体地址建立本地播放会话");
+  assert.match(patchScript, /if\(String\(B&&B\.videoUrl\|\|""\)\.includes\("\/toy\/midi\/songs\/"\)\)return!0/u,
+    "本地视频播单项不能再经过官方已下载状态门禁");
+  assert.match(patchScript, /OliviaSoulIsLocalUpload=q=>String\(q&&q\.videoUrl\|\|""\)\.includes\("\/toy\/midi\/songs\/"\)/u);
+  assert.match(patchScript, /"download-progress":OliviaSoulIsLocalUpload\(at\)\?100:/u,
+    "本地 HTTP 作品必须显示为已就绪而不是待下载");
+  assert.match(patchScript, /"download-state":OliviaSoulIsLocalUpload\(at\)\?"completed":/u);
+  assert.match(v23UpgradeScript, /OliviaSoulPatch:mail-music-v22/u);
+  assert.match(v23UpgradeScript, /OliviaSoulPatch:mail-music-v23/u);
+  assert.match(v23UpgradeScript, /OliviaSoulPatch:mail-music-v24/u);
+  assert.match(v23UpgradeScript, /String\(B&&B\.videoUrl\|\|""\)\.includes\("\/toy\/midi\/songs\/"\)/u);
+  assert.match(patchScript, /h\.beginLocalPlayback\(q\)/u,
+    "我的上传必须复用播放器存储中的唯一会话入口");
+  assert.match(patchScript, /beginLocalPlayback:OliviaSoulBeginLocalPlayback/u);
+  assert.match(patchScript, /e&&e\.cmd==="pause"\?\{\.\.\.e,cmd:"stop"\}:e/u,
+    "所有暂停命令必须归一为终止播放");
+  assert.match(patchScript, /restoreDefault:!1/u,
+    "本地作品切到官方作品前必须只释放旧会话，不能抢先切回默认壁纸");
+  assert.match(patchScript, /o=String\(window\.__OliviaSoulSessionId\|\|""\)[\s\S]{0,900}sessionId:o/u,
+    "控制命令必须绑定当前播放会话，旧 stop 不能误停同曲重播的新会话");
+  assert.match(patchScript, /OliviaSoulFinishLocalPlayback=async/u);
+  assert.match(patchScript, /OliviaSoulFinishLocalPlayback=async B=>[\s\S]{0,700}await fetch[\s\S]{0,500}restoreDefault:re/u,
+    "自然结束必须先终止后台旧会话");
+  assert.match(patchScript, /w\("stop_button"\),Ct\(\{cmd:"stop"\}\),m\.value=!1,u\.value=null,f\.value=null,d\.value=0/u);
+  assert.match(patchScript, /window\.__OliviaSoulSongId=null,window\.__OliviaSoulCommandRevision=null/u);
+  assert.match(patchScript, /window\.__OliviaSoulSessionId=null/u);
+  assert.match(patchScript, /window\.__OliviaSoulSessionEpoch/u);
+  assert.match(patchScript, /B\.sessionId\)!==String\(window\.__OliviaSoulSessionId/u,
+    "同一首作品重播时也必须用 sessionId 拒绝旧 ended");
+  assert.match(patchScript, /B\.playbackState==="ended"/u);
+  assert.match(patchScript, /h\.value==="songlist"/u);
+  assert.match(patchScript, /OliviaSoulFinishLocalPlayback\(B\)/u);
+  assert.match(patchScript, /p\.value===ot\.Single&&u\.value&&a\(u\.value\)\?M\(u\.value\):U\(\)/u);
+  assert.match(webplayerScript, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
+  assert.match(webplayerScript, /\/toy\/player-command/u);
+  assert.match(webplayerScript, /\/toy\/player-state/u);
+  assert.match(webplayerScript, /sessionId/u);
+  assert.match(webplayerScript, /mediaUrl/u);
+  assert.match(webplayerScript, /le\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\)/u,
+    "本地作品必须显式关闭从另一个 video 元素继承的循环属性");
+  assert.match(webplayerScript, /le\(e\.url,\{loop:!!e\.loop,mute:e\.mute,offset:e\.offset\}\)/u,
+    "官方作品必须显式覆盖从另一个 video 元素继承的循环属性");
+  assert.match(webplayerScript, /case"pause":case"stop"/u,
+    "官方与本地暂停都必须走同一终止分支");
+  assert.match(webplayerScript, /e\.cmd==="stop"&&e\.restoreDefault===!1/u,
+    "播单切歌释放旧会话时不能覆盖下一首官方作品");
+  assert.match(webplayerScript, /toLowerCase\(\)\.includes\("\/assets\/wallpaper_presence\/"\)/u,
+    "默认桌面片段不是循环视频，必须按官方资源路径识别");
+  assert.match(webplayerScript, /OliviaSoulRememberDefaultPlayback/u);
+  assert.match(webplayerScript, /OliviaSoulRestoreDefaultPlayback/u);
+  assert.match(webplayerScript, /sessionStorage/u,
+    "默认桌面片段必须跨 WebPlayer 页面生命周期保留");
+  assert.match(webplayerScript, /OliviaSoulRestoreDefaultPlayback[\s\S]{0,900}loop:!!e\.loop/u,
+    "暂停后应按官方默认桌面片段原本的循环属性恢复");
+  assert.match(webplayerScript, /OliviaSoulRestoreDefaultPlayback[\s\S]{0,900}fe\(\)/u,
+    "确实无法恢复默认片段时仍须停止当前演奏");
+  assert.match(webplayerScript, /const c=Number\.isFinite\(t\.duration\)&&t\.duration>0\?t\.duration:0/u,
+    "本地切歌期间不得把另一个 video 的共享短时长绑定给新作品");
+  assert.match(webplayerScript, /if\(e\.sessionId\)\{[\s\S]{0,600}\}else window\.__OliviaSoulRememberDefaultPlayback/u,
+    "本地 play 分支必须保留轮询器刚绑定的新会话，只有原生 play 才清除本地会话");
+  assert.match(webplayerScript, /case"preload"[\s\S]{0,180}OliviaSoulRememberDefaultPlayback/u,
+    "默认桌面仅处于预加载阶段时也必须留下可恢复候选");
+  assert.match(webplayerScript, /restoreDefault===!1\?i\.value&&i\.value\.pause\(\)/u,
+    "本地作品切到官方作品时必须先暂停旧 video，避免迟到 ended 污染下一首");
+  assert.match(webplayerScript, /const p=String\(t\.currentSrc\|\|t\.src\|\|""\);[\s\S]{0,900}if\(p\.includes\("\/toy\/midi\/songs\/"\)\)return/u,
+    "已经释放会话的本地 timeupdate 不得作为官方播放器事件转发");
+  assert.match(webplayerScript, /const p=String\(e\.target\.currentSrc\|\|e\.target\.src\|\|""\);[\s\S]{0,900}if\(p\.includes\("\/toy\/midi\/songs\/"\)\)return/u,
+    "已经释放会话的本地 ended 不得结束刚切换的官方歌曲");
+  assert.match(webplayerScript, /pe\(\{\.\.\.c\.command,__oliviaRevision:c\.revision/u,
+    "轮询器必须把 revision 交给 play handler，并由新 video 建立后再绑定会话");
+  assert.match(webplayerScript, /le\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\),window\.__OliviaSoulActivePlayerRevision=Number\(e\.__oliviaRevision\)/u,
+    "同曲重播也必须在切换 video 后才绑定新会话，避免旧 ended 冒充新会话");
+  assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null\)[\s\S]{0,500}playbackState==="playing"[\s\S]{0,400}pe\(\{\.\.\.c\.command,[\s\S]{0,300}__oliviaRevision:c\.revision/u,
+    "首次挂载时即使最新命令是 seek 或音量控制，也必须从 player-state 恢复正在播放的本地作品");
+  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return fetch/u,
+    "本地时间轴不得再同时发送原生和本地两套进度事件");
+  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return fetch[\s\S]{0,520}event:"ended"/u,
+    "本地自然结束必须留给前端播单推进，不能先恢复默认壁纸");
+  assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey/u,
+    "命令去重必须使用会话键，服务重启后不能因 revision 回退而忽略新命令");
+  assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null/u,
+    "WebPlayer 首次挂载必须识别遗留命令而不是直接重放");
+  assert.match(webplayerScript, /S&&S\.playbackState==="playing"&&S\.commandRevision===c\.revision/u,
+    "首次挂载必须核对实时状态，不能重播已经 ended/stopped 的旧 play 命令");
+  assert.match(webplayerUpgradeScript, /webplayer-no-watermark-direct-http-progress-v6/u);
+  assert.match(webplayerUpgradeScript, /webplayer-no-watermark-direct-http-progress-v7/u);
+  assert.match(webplayerUpgradeScript, /webplayer-no-watermark-direct-http-progress-v8/u);
+  assert.match(webplayerUpgradeScript, /__OliviaSoulPlayerCommandKey===null/u);
+  assert.match(controller, /upgrade-feapp-v22-v23\.ps1/u);
+  assert.match(controller, /upgrade-webplayer-v6-v7\.ps1/u);
+  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"\]\.includes\(current\.revision\)[\s\S]{0,1600}patch-feapp-local\.ps1/u,
+    "v24 through v30 upgrades must rebuild current FE from pristine backup");
+  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"\]\.includes\(current\.revision\)[\s\S]{0,2600}patch-webplayer-local\.ps1/u,
+    "v24 through v30 upgrades must rebuild the WebPlayer when it is not current at the requested port");
+  assert.match(webplayerScript, /\[string\]\$ServiceUrl/u);
+  assert.doesNotMatch(patchScript, /OliviaSoulPendingUpload=b\(null\)/u);
+  assert.doesNotMatch(patchScript, /syncLocalStatus\(\[Le\(q\)\]\)/u);
+  assert.doesNotMatch(patchScript, /q==="completed".*Ro\(me\)/u);
+  assert.match(upgradeScript, /\$playV19/u);
+  assert.match(upgradeScript, /\$playDirect/u);
+  assert.match(upgradeScript, /\$completionV19/u);
+  assert.match(patchScript, /g\.value<=0\?1:Math\.max\(0,g\.value-y\.value\)/u);
+  assert.match(patchScript, /patched archive still treats unlimited MIDI as exhausted/u);
+  assert.match(patchScript, /OliviaSoulSilentRefresh=async\(\)=>\{if\(Q\.value&&!OliviaSoulUploadRefreshing\)/u);
+  assert.match(patchScript, /OliviaSoulUploadRevision===at\.revision/u);
+  assert.match(patchScript, /Object\.assign\(he\.value\[kt\],wt\)/u);
+  assert.doesNotMatch(patchScript, /he\.value\.splice\(0,he\.value\.length,\.\.\.at\.list\)/u);
+  assert.match(patchScript, /OliviaSoulSearchComposing/u);
+  assert.match(patchScript, /onCompositionstart:OliviaSoulCompositionStart,onCompositionend:OliviaSoulCompositionEnd/u);
+  assert.match(patchScript, /OliviaSoulUploadRefresh=setInterval\(\(\)=>\{Q\.value&&OliviaSoulSilentRefresh\(\)\},5000\)/u);
+  assert.match(patchScript, /OliviaSoulSearchTimer=null,OliviaSoulUploadRefresh=null,OliviaSoulUploadRevision=null/u);
+  assert.doesNotMatch(patchScript, /RefreshTo = 'let OliviaSoulUploadRefresh/u);
+  assert.match(patchScript, /OliviaSoulUploadRefresh&&\(clearInterval\(OliviaSoulUploadRefresh\),OliviaSoulUploadRefresh=null\)/u);
+  assert.match(patchScript, /OliviaSoulUploadSearch=b\(""\)/u);
+  assert.match(patchScript, /query:OliviaSoulUploadSearch\.value/u);
+  assert.match(patchScript, /placeholder:"\\u641c\\u7d22\\u6211\\u7684\\u4e0a\\u4f20"/u);
+  assert.match(patchScript, /localeReplacementBase64/u);
+  assert.match(localeScript, /SnM9IuS4jemZkOasoeaVsCI=/u);
+  assert.match(patchScript, /c=\{\.\.\.p\},l\.value=\{\.\.\.l\.value,\.\.\.p,mailWidget:!0,musicWidget:!0\}/u);
+  assert.match(patchScript, /FromBase64String/u);
+  assert.match(patchScript, /Ce=j\(\(\)=>Q\.value\?te\.value:w\.value\?oe\.getSongsByStyle/u);
+  assert.match(patchScript, /patched archive still lets offline catalog shadow My Upload/u);
+  assert.match(patchScript, /patched archive still exposes the share-code tab/u);
+  assert.match(patchScript, /patched archive still exposes song sharing/u);
+  assert.match(patchScript, /patched archive still renders the bottom-right uid/u);
+  assert.match(patchScript, /xmlns:TC260/u);
+  assert.match(patchScript, /\/letter\/share/u);
+  assert.doesNotMatch(patchScript, /100\.124\.216\.70|m4\.tailf0d018\.ts\.net/u);
+});
+
+test("webplayer 补丁精确移除桌面 UID 水印并可从原版备份还原", async () => {
+  const [patch, status, restore] = await Promise.all([
+    readFile(new URL("../../tools/patch-webplayer-local.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/get-webplayer-status.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../tools/restore-webplayer-original.ps1", import.meta.url), "utf8"),
+  ]);
+  const watermark = 'S(n)?(k(),we(l,{key:0,uid:S(n)},null,8,["uid"])):Re("",!0)';
+  assert.match(patch, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v12/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v11/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v10/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v9/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v8/u);
+  assert.match(patch, /__OliviaSoulPlayerPoll/u);
+  assert.match(patch, /\/toy\/player-command/u);
+  assert.match(patch, /\/toy\/player-state/u);
+  assert.ok(patch.includes(watermark));
+  assert.ok(status.includes(watermark));
+  assert.match(patch, /expected one webplayer UID watermark render/u);
+  assert.match(patch, /patched webplayer still renders the UID watermark/u);
+  assert.match(restore, /Copy-Item -LiteralPath \$OriginalFile -Destination \$destination -Force/u);
+  assert.doesNotMatch(patch, /100\.124\.216\.70|m4\.tailf0d018\.ts\.net/u);
 });
 
 test("游戏进程在停止前已退出时挂载流程继续", async () => {
@@ -558,7 +1215,7 @@ test("发布脚本为现有二进制生成校验和", async () => {
 });
 
 test("v18 发布配置只同步当前 Harness 文件并清理旧文件", async () => {
-  const [harnessScript, retrievalScript, liveScript, precheck, stateInitializer, historyPrompt, buildScript, nodeHost, desktopMain, installer, server] = await Promise.all([
+  const [harnessScript, retrievalScript, liveScript, precheck, stateInitializer, historyPrompt, buildScript, nodeHost, workspaceTemplate, desktopMain, installer, server] = await Promise.all([
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/harness-4step.ps1", import.meta.url), "utf8"),
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/history-retrieval.ps1", import.meta.url), "utf8"),
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/harness-live.ps1", import.meta.url), "utf8"),
@@ -567,6 +1224,7 @@ test("v18 发布配置只同步当前 Harness 文件并清理旧文件", async (
     readFile(new URL("../../harness/02-历史检索.md", import.meta.url), "utf8"),
     readFile(new URL("../packaging/build-release.ps1", import.meta.url), "utf8"),
     readFile(new URL("../desktop/node-host.js", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/workspace-template.js", import.meta.url), "utf8"),
     readFile(new URL("../desktop/main.js", import.meta.url), "utf8"),
     readFile(new URL("../packaging/OliviaSoul.iss", import.meta.url), "utf8"),
     readFile(new URL("../server.js", import.meta.url), "utf8"),
@@ -598,14 +1256,19 @@ test("v18 发布配置只同步当前 Harness 文件并清理旧文件", async (
   assert.match(buildScript, /sqlite-memory-load\.cjs/u);
   assert.doesNotMatch(buildScript, /00-脚本算术\.md|00-strict-precheck\.md|02-读信感\.md|06-实时回信\.md/u);
   assert.doesNotMatch(buildScript, /linli-letters\.mdc/u);
-  assert.match(desktopMain, /width: 1298,[\s\S]*height: 858,/u);
-  assert.match(installer, /\{commonappdata\}\\OliviaSoul"; Permissions: users-modify/u);
+  assert.match(desktopMain, /workAreaSize/u);
+  assert.match(desktopMain, /width:\s*Math\.min\(1120,\s*Math\.max\(820,/u);
+  assert.match(desktopMain, /height:\s*Math\.min\(720,\s*Math\.max\(620,/u);
+  assert.match(installer, /PrivilegesRequired=lowest/u);
+  assert.match(installer, /DefaultDirName=\{localappdata\}\\Programs\\OliviaSoul/u);
+  assert.doesNotMatch(installer, /\{commonappdata\}\\OliviaSoul/u);
   assert.doesNotMatch(nodeHost, /copyIfPresent\(join\(template, "\.cursor", "rules"/u);
-  assert.match(nodeHost, /rm\(join\(root, "\.cursor", "rules"\), \{ recursive: true, force: true \}\)/u);
+  assert.match(nodeHost, /prepareWorkspaceIncrementally/u);
+  assert.match(workspaceTemplate, /rm\(join\(resolvedRoot, "\.cursor", "rules"\), \{ recursive: true, force: true \}\)/u);
   assert.doesNotMatch(desktopMain, /cp\(join\(template, "\.cursor", "rules"/u);
-  assert.match(desktopMain, /rm\(join\(root, "\.cursor", "rules"\), \{ recursive: true, force: true \}\)/u);
-  assert.match(nodeHost, /rm\(join\(root, "harness", "00-脚本算术\.md"\)/u);
-  assert.match(nodeHost, /rm\(join\(root, "harness", "00-strict-precheck\.md"\)/u);
+  assert.match(desktopMain, /prepareWorkspaceIncrementally/u);
+  assert.match(workspaceTemplate, /rm\(join\(resolvedRoot, "harness", "00-脚本算术\.md"\)/u);
+  assert.match(workspaceTemplate, /rm\(join\(resolvedRoot, "harness", "00-strict-precheck\.md"\)/u);
   assert.match(installer, /InstallDelete[\s\S]*00-脚本算术\.md/u);
   assert.match(installer, /InstallDelete[\s\S]*00-strict-precheck\.md/u);
   assert.match(installer, /InstallDelete[\s\S]*\.cursor\\rules/u);
@@ -779,7 +1442,9 @@ test("桌面监听进程随父进程退出并保留无正文诊断日志", async
   assert.match(nodeHost, /close\("parent-missing"\)/u);
   assert.match(mainForm, /"runtime\.log"/u);
   assert.match(mainForm, /_backend\.Log \+= WriteRuntimeLog/u);
-  assert.match(mainForm, /Width = 1298;[\s\S]*Height = 858;/u);
+  assert.match(mainForm, /Screen\.PrimaryScreen\.WorkingArea/u);
+  assert.match(mainForm, /Width = Math\.Min\(1120, Math\.Max\(820,/u);
+  assert.match(mainForm, /Height = Math\.Min\(720, Math\.Max\(620,/u);
 });
 
 test("Node 宿主的 stdin 关闭后会退出并释放监听端口", async t => {
@@ -788,10 +1453,14 @@ test("Node 宿主的 stdin 关闭后会退出并释放监听端口", async t => 
   const dataDir = join(root, "data");
   const workspace = join(root, "workspace");
   const template = join(root, "template");
+  const songStorage = join(root, "song-storage");
+  const usersettingsPath = join(root, "usersettings.dat");
   await Promise.all([
     mkdir(appData, { recursive: true }),
     mkdir(template, { recursive: true }),
+    mkdir(songStorage, { recursive: true }),
   ]);
+  await writeFile(usersettingsPath, Buffer.from(`songStoragePath\u0000${JSON.stringify(songStorage)}`));
   const portProbe = createNetServer();
   await new Promise((resolvePromise, reject) => {
     portProbe.once("error", reject);
@@ -806,6 +1475,7 @@ test("Node 宿主的 stdin 关闭后会退出并释放监听端口", async t => 
     "--data-dir", dataDir,
     "--template", template,
     "--app-data", appData,
+    "--usersettings", usersettingsPath,
     "--executable", join(root, "OliviaSoul.exe"),
     "--parent-pid", String(process.pid),
   ], { stdio: ["pipe", "pipe", "pipe"] });
@@ -1330,31 +2000,40 @@ test("每天按本地自然日最多发送三封", async t => {
   assert.notEqual(rejected.body.code, 0);
 });
 
-test("每日写信上限默认不限且可在调试页手动修改", async t => {
+test("每日写信上限默认三封且零表示当天不能写信", async t => {
   const ctx = await fixture({ dailyLetterLimit: undefined });
   t.after(() => ctx.close());
   await signIn(ctx);
 
   const initial = await ctx.request("/admin/api/debug");
-  assert.equal(initial.body.data.dailyLetterLimit, 0);
-  assert.equal(initial.body.data.remainingToday, null);
-  for (let index = 0; index < 4; index++) {
+  assert.equal(initial.body.data.dailyLetterLimit, 3);
+  assert.equal(initial.body.data.remainingToday, 3);
+  assert.equal(Number.isInteger(initial.body.data.remainingToday), true);
+  assert.equal(Number.isInteger(initial.body.data.revision), true);
+  for (let index = 0; index < 3; index++) {
     const sent = await ctx.request("/toy/letter/send", {
       method: "POST",
-      body: JSON.stringify({ content: `不限次数 ${index + 1}` }),
+      body: JSON.stringify({ content: `默认额度 ${index + 1}` }),
     });
     assert.equal(sent.body.code, 0);
-    assert.equal(sent.body.data.remainingToday, null);
+    assert.equal(sent.body.data.remainingToday, 2 - index);
+    assert.equal(Number.isInteger(sent.body.data.revision), true);
   }
 
-  const limited = await ctx.request("/admin/api/debug/quota/limit", {
+  const zero = await ctx.request("/admin/api/debug/quota/limit", {
     method: "POST",
-    body: JSON.stringify({ limit: 3 }),
+    body: JSON.stringify({ limit: 0 }),
   });
-  assert.equal(limited.body.data.dailyLetterLimit, 3);
-  assert.equal(limited.body.data.remainingToday, 0);
+  assert.equal(zero.body.data.dailyLetterLimit, 0);
+  assert.equal(zero.body.data.remainingToday, 0);
+  assert.equal(Number.isInteger(zero.body.data.revision), true);
   const reset = await ctx.request("/admin/api/debug/quota/reset", { method: "POST", body: "{}" });
-  assert.equal(reset.body.data.remainingToday, 3);
+  assert.equal(reset.body.data.remainingToday, 0);
+  const rejected = await ctx.request("/toy/letter/send", {
+    method: "POST",
+    body: JSON.stringify({ content: "额度为零时不能寄出" }),
+  });
+  assert.notEqual(rejected.body.code, 0);
 
   const invalid = await ctx.request("/admin/api/debug/quota/limit", {
     method: "POST",
@@ -1362,7 +2041,8 @@ test("每日写信上限默认不限且可在调试页手动修改", async t => 
   });
   assert.equal(invalid.status, 400);
   const afterInvalid = await ctx.request("/admin/api/debug");
-  assert.equal(afterInvalid.body.data.dailyLetterLimit, 3);
+  assert.equal(afterInvalid.body.data.dailyLetterLimit, 0);
+  assert.equal(afterInvalid.body.data.remainingToday, 0);
 });
 
 test("连续发出的第二封信也会生成并进入记忆库", async t => {
@@ -1933,9 +2613,10 @@ test("管理页手动切换模型：分别编辑测试并显式启用档案", as
   const ctx = await fixture();
   t.after(() => ctx.close());
   const base = `http://127.0.0.1:${ctx.service.server.address().port}`;
-  const [html, app, buildRelease, dsCall, deepSeekReply] = await Promise.all([
+  const [html, app, comboModule, buildRelease, dsCall, deepSeekReply] = await Promise.all([
     fetch(`${base}/admin/`).then(response => response.text()),
     fetch(`${base}/admin/app.js`).then(response => response.text()),
+    fetch(`${base}/admin/model-combobox.js`).then(async response => ({ status: response.status, text: await response.text() })),
     readFile(new URL("../packaging/build-release.ps1", import.meta.url), "utf8"),
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/ds-call.ps1", import.meta.url), "utf8"),
     readFile(new URL("../../.cursor/skills/fit-letters/scripts/deepseek-reply.ps1", import.meta.url), "utf8"),
@@ -1949,19 +2630,41 @@ test("管理页手动切换模型：分别编辑测试并显式启用档案", as
   assert.match(html, /data-model-profile="local"/u);
   assert.match(html, /id="testDeepSeek"/u);
   assert.match(html, /id="testLocalModel"/u);
-  assert.match(html, /gemma-4-26b-a4b-it-ultra-uncensored-heretic/u);
-  assert.match(app, /\/admin\/api\/model\/profile/u);
-  assert.match(app, /\/admin\/api\/model\/test/u);
+  assert.match(html, /id="resetModelConfig"/u);
+  assert.match(html, /id="resetModelResult"/u);
+  assert.match(html, /远程兼容 API/u);
+  assert.match(html, /本地兼容 API/u);
+  assert.match(html, /id="queryRemoteModels"/u);
+  assert.match(html, /id="queryLocalModels"/u);
+  assert.match(html, /<select id="modelName"/u);
+  assert.match(html, /<select id="localModelName"/u);
+  assert.doesNotMatch(html, /data-model-combobox|localAiExecutable|本地 AI 进程/u);
+  assert.match(html, /data-tab="update"/u);
+  assert.match(html, /data-page="update"/u);
+  assert.doesNotMatch(html, /本地 Gemma|private-model-name/u);
+  assert.match(app, /\/admin\/api\/model\/test-save/u);
   assert.match(app, /\/admin\/api\/model\/activate/u);
+  assert.match(app, /\/admin\/api\/model\/models/u);
+  assert.match(app, /#resetModelConfig[\s\S]+confirmNotice\([^)]+\)[\s\S]+\/admin\/api\/models\/reset/u);
   assert.match(app, /provider:\s*"deepseek"/u);
   assert.match(app, /provider:\s*"local"/u);
+  assert.equal(comboModule.status, 404);
+  assert.match(html, /id="activateModelProvider"[^>]*>检测并设为当前模型</u);
+  assert.match(app, /连接成功，配置已保存/u);
+  assert.doesNotMatch(app, /saveDeepSeekConfig|saveLocalModelConfig/u);
+  assert.match(app, /检测成功，已设为当前模型/u);
+  assert.match(app, /当前：\$\{providerLabel\(config\.activeProvider\)\} · \$\{activeProfile\.model\}/u);
   assert.match(buildRelease, /"model-config\.js"/u);
+  assert.match(buildRelease, /"upgrade-feapp-v14-v16\.ps1"/u);
+  assert.match(buildRelease, /"upgrade-feapp-v16-v17\.ps1"/u);
+  assert.match(buildRelease, /"upgrade-feapp-v22-v23\.ps1"/u);
+  assert.match(buildRelease, /"upgrade-webplayer-v6-v7\.ps1"/u);
   assert.match(buildRelease, /"model-call\.ps1"/u);
   assert.match(dsCall, /model-call\.ps1/u);
   assert.match(deepSeekReply, /model-call\.ps1/u);
 });
 
-test("模型档案可独立保存测试并且只有手动激活才切换", async t => {
+test("模型档案可独立保存测试并且只有检测通过才手动切换", async t => {
   const calls = [];
   const ctx = await fixture({
     fetch: async (url, options) => {
@@ -1977,7 +2680,7 @@ test("模型档案可独立保存测试并且只有手动激活才切换", async
   const initial = await ctx.request("/admin/api/model");
   assert.equal(initial.status, 200);
   assert.equal(initial.body.data.activeProvider, "deepseek");
-  assert.equal(initial.body.data.profiles.local.model, "gemma-4-26b-a4b-it-ultra-uncensored-heretic");
+  assert.equal(initial.body.data.profiles.local.model, "local-model");
 
   const saved = await ctx.request("/admin/api/model/profile", {
     method: "POST",
@@ -2011,7 +2714,414 @@ test("模型档案可独立保存测试并且只有手动激活才切换", async
   });
   assert.equal(activated.status, 200);
   assert.equal(activated.body.data.activeProvider, "local");
+  assert.equal(calls.length, 2);
   assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "local");
+});
+
+test("重置模型 API 只清除模型配置并保留其他 UserData", async t => {
+  const ctx = await fixture();
+  t.after(() => ctx.close());
+  const secrets = join(ctx.root, ".cursor", "secrets");
+  const archive = join(ctx.root, "信件往来", "reset-sentinel.md");
+  const media = join(ctx.root, "data", "videos", "reset-sentinel.mp4");
+  await mkdir(secrets, { recursive: true });
+  await mkdir(dirname(media), { recursive: true });
+  await writeFile(join(secrets, "model.env"), [
+    "MODEL_ACTIVE_PROVIDER=local",
+    "MODEL_LOCAL_BASE=http://127.0.0.1:9876/v1",
+    "MODEL_LOCAL_MODEL=private-model",
+    "MODEL_LOCAL_AUTH_MODE=none",
+    "MODEL_LOCAL_API_KEY=",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(join(secrets, "deepseek.env"), "DEEPSEEK_API_KEY=private-key\n", "utf8");
+  await writeFile(join(secrets, "keep.txt"), "keep-secret-neighbor", "utf8");
+  await writeFile(archive, "keep-letter", "utf8");
+  await writeFile(media, "keep-media", "utf8");
+  ctx.service.db.prepare("INSERT INTO settings(key, value) VALUES('model_reset_sentinel', 'keep-database')").run();
+
+  const response = await ctx.request("/admin/api/models/reset", { method: "POST", body: "{}" });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.data.activeProvider, "deepseek");
+  assert.equal(response.body.data.profiles.deepseek.keyConfigured, false);
+  assert.equal(response.body.data.profiles.local.baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(response.body.data.profiles.local.model, "local-model");
+  await assert.rejects(readFile(join(secrets, "model.env")), error => error.code === "ENOENT");
+  await assert.rejects(readFile(join(secrets, "deepseek.env")), error => error.code === "ENOENT");
+  assert.equal(await readFile(join(secrets, "keep.txt"), "utf8"), "keep-secret-neighbor");
+  assert.equal(await readFile(archive, "utf8"), "keep-letter");
+  assert.equal(await readFile(media, "utf8"), "keep-media");
+  assert.equal(ctx.service.db.prepare("SELECT value FROM settings WHERE key = 'model_reset_sentinel'").get().value, "keep-database");
+  assert.equal(ctx.service.db.prepare("PRAGMA quick_check").get().quick_check, "ok");
+  assert.equal((await ctx.request("/admin/api/model/status")).body.data.state, "unconfigured");
+});
+
+test("清除模型配置后迟到的旧检测结果不能恢复旧模型状态", async t => {
+  let releaseProbe;
+  let announceProbe;
+  const probeStarted = new Promise(resolvePromise => { announceProbe = resolvePromise; });
+  const ctx = await fixture({
+    fetch: async () => {
+      announceProbe();
+      return new Promise(resolvePromise => { releaseProbe = resolvePromise; });
+    },
+  });
+  t.after(() => ctx.close());
+  const secrets = join(ctx.root, ".cursor", "secrets");
+  await mkdir(secrets, { recursive: true });
+  await writeFile(join(secrets, "model.env"), [
+    "MODEL_ACTIVE_PROVIDER=local",
+    "MODEL_LOCAL_BASE=http://127.0.0.1:9876/v1",
+    "MODEL_LOCAL_MODEL=old-private-model",
+    "MODEL_LOCAL_AUTH_MODE=none",
+    "MODEL_LOCAL_API_KEY=",
+    "",
+  ].join("\n"), "utf8");
+
+  const detecting = ctx.request("/admin/api/model/detect", { method: "POST", body: "{}" });
+  await probeStarted;
+  const reset = await ctx.request("/admin/api/models/reset", { method: "POST", body: "{}" });
+  assert.equal(reset.status, 200);
+  releaseProbe(Response.json({ choices: [{ message: { content: "OK" } }] }));
+  await detecting;
+
+  const status = await ctx.request("/admin/api/model/status");
+  assert.deepEqual(status.body.data, {
+    provider: "deepseek",
+    model: "deepseek-v4-pro",
+    state: "unconfigured",
+    error: null,
+  });
+});
+
+for (const operation of ["activate", "test-save"]) {
+  test(`清除模型配置会使进行中的旧 ${operation} 操作失效`, async t => {
+    let releaseProbe;
+    let announceProbe;
+    const probeStarted = new Promise(resolvePromise => { announceProbe = resolvePromise; });
+    const ctx = await fixture({
+      fetch: async () => {
+        announceProbe();
+        return new Promise(resolvePromise => { releaseProbe = resolvePromise; });
+      },
+    });
+    t.after(() => ctx.close());
+    const secrets = join(ctx.root, ".cursor", "secrets");
+    await mkdir(secrets, { recursive: true });
+    await writeFile(join(secrets, "model.env"), [
+      "MODEL_ACTIVE_PROVIDER=deepseek",
+      "MODEL_LOCAL_BASE=http://127.0.0.1:9876/v1",
+      "MODEL_LOCAL_MODEL=old-private-model",
+      "MODEL_LOCAL_AUTH_MODE=none",
+      "MODEL_LOCAL_API_KEY=",
+      "",
+    ].join("\n"), "utf8");
+    const body = operation === "activate"
+      ? { provider: "local" }
+      : {
+          provider: "local",
+          baseUrl: "http://127.0.0.1:9876/v1",
+          model: "old-private-model",
+          authMode: "none",
+          apiKey: "",
+        };
+
+    const pending = ctx.request(`/admin/api/model/${operation}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    await probeStarted;
+    assert.equal((await ctx.request("/admin/api/models/reset", { method: "POST", body: "{}" })).status, 200);
+    releaseProbe(Response.json({ choices: [{ message: { content: "OK" } }] }));
+    assert.equal((await pending).status, 409);
+
+    const config = await ctx.request("/admin/api/model");
+    assert.equal(config.body.data.activeProvider, "deepseek");
+    assert.equal(config.body.data.profiles.local.model, "local-model");
+    assert.equal((await ctx.request("/admin/api/model/status")).body.data.state, "unconfigured");
+    await assert.rejects(readFile(join(secrets, "model.env")), error => error.code === "ENOENT");
+  });
+}
+
+test("兼容模型接口从标准 models 端点查询候选且不切换当前档案", async t => {
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return Response.json({ data: [{ id: "model-z" }, { id: "model-a" }, { id: "model-a" }] });
+    },
+  });
+  t.after(() => ctx.close());
+
+  const models = await ctx.request("/admin/api/model/models", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://compatible.example/v1/",
+      authMode: "bearer",
+      apiKey: "compatible-key",
+    }),
+  });
+  assert.equal(models.status, 200);
+  assert.deepEqual(models.body.data, {
+    provider: "local",
+    models: ["model-a", "model-z"],
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://compatible.example/v1/models");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer compatible-key");
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "deepseek");
+});
+
+test("保存并测试失败时保留原模型档案", async t => {
+  const ctx = await fixture({
+    fetch: async () => new Response("unavailable", { status: 503 }),
+  });
+  t.after(() => ctx.close());
+  const before = (await ctx.request("/admin/api/model")).body.data.profiles.local;
+
+  const tested = await ctx.request("/admin/api/model/test-save", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://candidate.example/v1",
+      model: "candidate-model",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+
+  assert.equal(tested.status, 502);
+  const after = (await ctx.request("/admin/api/model")).body.data.profiles.local;
+  assert.equal(after.baseUrl, before.baseUrl);
+  assert.equal(after.model, before.model);
+});
+
+test("保存并测试成功后才写入用户选择的模型", async t => {
+  const ctx = await fixture({
+    fetch: async () => Response.json({ choices: [{ message: { content: "OK" } }] }),
+  });
+  t.after(() => ctx.close());
+
+  const tested = await ctx.request("/admin/api/model/test-save", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://candidate.example/v1/",
+      model: "candidate-model",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+
+  assert.equal(tested.status, 200);
+  assert.equal(tested.body.data.connected, true);
+  assert.equal(tested.body.data.config.profiles.local.baseUrl, "https://candidate.example/v1");
+  assert.equal(tested.body.data.config.profiles.local.model, "candidate-model");
+  assert.equal(tested.body.data.config.activeProvider, "deepseek");
+});
+
+test("模型连通性测试兼容主流文本响应结构和推理文本", async t => {
+  const payloads = [
+    { choices: [{ message: { content: [{ type: "text", text: "OK" }] } }] },
+    { choices: [{ message: { content: null, reasoning_content: "OK" } }] },
+    { choices: [{ text: "OK" }] },
+    { output_text: "OK" },
+    { output: [{ content: [{ type: "output_text", text: "OK" }] }] },
+  ];
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (_url, options) => {
+      calls.push(JSON.parse(options.body));
+      return Response.json(payloads.shift());
+    },
+  });
+  t.after(() => ctx.close());
+
+  for (let index = 0; index < 5; index += 1) {
+    const tested = await ctx.request("/admin/api/model/test-save", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "local",
+        baseUrl: "https://candidate.example/v1/",
+        model: `candidate-model-${index}`,
+        authMode: "none",
+        apiKey: "",
+      }),
+    });
+    assert.equal(tested.status, 200);
+  }
+
+  assert.equal(calls.length, 5);
+  assert.ok(calls.every(call => call.max_tokens >= 64), "推理模型探测必须留出生成最终文字的空间");
+});
+
+test("模型连通性测试仍拒绝没有任何文字的成功响应", async t => {
+  const ctx = await fixture({
+    fetch: async () => Response.json({ choices: [{ message: { content: null } }] }),
+  });
+  t.after(() => ctx.close());
+
+  const tested = await ctx.request("/admin/api/model/test-save", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://candidate.example/v1/",
+      model: "empty-model",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+
+  assert.equal(tested.status, 502);
+  assert.match(tested.body.message, /模型没有返回有效文字/u);
+});
+
+test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
+  const ctx = await fixture();
+  t.after(() => ctx.close());
+
+  for (const [method, path] of [
+    ["GET", "/admin/api/local-ai/process"],
+    ["POST", "/admin/api/local-ai/process"],
+    ["POST", "/admin/api/local-ai/start"],
+    ["POST", "/admin/api/local-ai/stop"],
+  ]) {
+    const response = await ctx.request(path, { method, body: method === "POST" ? "{}" : undefined });
+    assert.equal(response.status, 410);
+    assert.equal(response.body.code, "LOCAL_AI_PROCESS_REMOVED");
+  }
+});
+
+test("检查更新从公开 GitHub Release 查询并校验下载 Setup 到 I 盘式数据目录", async t => {
+  const installer = Buffer.from("setup-binary", "utf8");
+  const digest = createHash("sha256").update(installer).digest("hex");
+  const calls = [];
+  const release = {
+    tag_name: "2008.2.7-linli.3",
+    html_url: "https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.3",
+    assets: [{
+      name: "OliviaSoul-2008.2.7-Setup.exe",
+      browser_download_url: "https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.3/OliviaSoul-2008.2.7-Setup.exe",
+      size: installer.length,
+      digest: `sha256:${digest}`,
+    }],
+  };
+  const ctx = await fixture({
+    updateCurrentTag: "2008.2.7-linli.2",
+    fetch: async url => {
+      calls.push(url);
+      return url.includes("api.github.com") ? Response.json(release) : new Response(installer);
+    },
+  });
+  t.after(() => ctx.close());
+
+  const checked = await ctx.request("/admin/api/update");
+  assert.equal(checked.status, 200);
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.2");
+  assert.equal(checked.body.data.latestTag, "2008.2.7-linli.3");
+  assert.equal(checked.body.data.updateAvailable, true);
+  assert.doesNotMatch(JSON.stringify(checked.body), /browser_download_url/u);
+
+  const downloaded = await ctx.request("/admin/api/update/download", { method: "POST" });
+  assert.equal(downloaded.status, 200);
+  assert.equal(downloaded.body.data.tag, "2008.2.7-linli.3");
+  assert.match(downloaded.body.data.path, /updates[\\/]2008\.2\.7-linli\.3[\\/]OliviaSoul-2008\.2\.7-Setup\.exe$/u);
+  assert.deepEqual(await readFile(downloaded.body.data.path), installer);
+  assert.equal(calls.filter(url => url.includes("api.github.com")).length, 2);
+});
+
+test("模型检测失败时拒绝启用且保留原当前模型", async t => {
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return new Response("local unavailable", { status: 503 });
+    },
+  });
+  t.after(() => ctx.close());
+
+  const saved = await ctx.request("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://local.example/v1",
+      model: "gemma-test",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+  assert.equal(saved.status, 200);
+
+  const activated = await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+  assert.equal(activated.status, 502);
+  assert.match(activated.body.message, /local.*检测失败.*HTTP 503/u);
+  assert.equal(calls.length, 1);
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "deepseek");
+});
+
+test("未配置 DeepSeek API Key 时拒绝从本地模型切换过去", async t => {
+  const calls = [];
+  const ctx = await fixture({
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return Response.json({ choices: [{ message: { content: "OK" } }] });
+    },
+  });
+  t.after(() => ctx.close());
+
+  await ctx.request("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://local.example/v1",
+      model: "gemma-test",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+  assert.equal((await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  })).status, 200);
+
+  const activated = await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "deepseek" }),
+  });
+  assert.equal(activated.status, 400);
+  assert.match(activated.body.message, /API Key/u);
+  assert.equal(calls.length, 1);
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "local");
+});
+
+test("模型返回 HTTP 200 但没有文字时仍拒绝切换", async t => {
+  const ctx = await fixture({
+    fetch: async () => Response.json({ choices: [] }),
+  });
+  t.after(() => ctx.close());
+  await ctx.request("/admin/api/model/profile", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "local",
+      baseUrl: "https://local.example/v1",
+      model: "gemma-test",
+      authMode: "none",
+      apiKey: "",
+    }),
+  });
+
+  const activated = await ctx.request("/admin/api/model/activate", {
+    method: "POST",
+    body: JSON.stringify({ provider: "local" }),
+  });
+  assert.equal(activated.status, 502);
+  assert.match(activated.body.message, /没有返回有效文字/u);
+  assert.equal((await ctx.request("/admin/api/model")).body.data.activeProvider, "deepseek");
 });
 
 test("本地模型失败不回退 DeepSeek", async t => {
@@ -2019,6 +3129,8 @@ test("本地模型失败不回退 DeepSeek", async t => {
   const ctx = await fixture({
     fetch: async (url, options) => {
       calls.push({ url, options });
+      if (calls.length === 1)
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
       return new Response("local unavailable", { status: 503 });
     },
   });
@@ -2044,9 +3156,9 @@ test("本地模型失败不回退 DeepSeek", async t => {
   });
   assert.equal(result.status, 502);
   assert.match(result.body.message, /local/u);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "https://local.example/v1/chat/completions");
-  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, "https://local.example/v1/chat/completions");
+  assert.equal(calls[1].options.headers.Authorization, undefined);
   assert.doesNotMatch(calls.map(call => call.url).join("\n"), /api\.deepseek\.com/u);
 });
 
@@ -2910,6 +4022,10 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.doesNotMatch(html, /data-memory-tab="remote"/u);
   assert.match(html, /data-tab="debug"/u);
   assert.match(html, />高级设置</u);
+  assert.match(html, /id="midiSongSearch"/u);
+  assert.match(html, /至少包含一个可播放的 MP4/u);
+  assert.doesNotMatch(html, /只有 MIDI 时会自动生成钢琴音频和演奏视频/u);
+  assert.match(app, /midiStatusSnapshot/u);
     assert.match(html, /id="transcriptionModelProgress"/u);
     assert.match(html, /id="remoteMemoryModelProgress"/u);
     assert.doesNotMatch(html, /标准记忆 JSON/u);
@@ -2928,9 +4044,11 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.match(app, /label\.classList\.toggle\("loadingShine", status\.state === "running"\)/u);
   assert.doesNotMatch(app, /替换视频/u);
   assert.match(styles, /\.videoAttachment/u);
-    assert.match(styles, /html::-webkit-scrollbar \{ width: 0/u);
+  assert.match(styles, /::-webkit-scrollbar \{ width: 10px; height: 10px; \}/u);
+  assert.match(styles, /\.content \{[^}]*overflow-y: auto/u);
   assert.match(styles, /body[\s\S]*user-select: none/u);
   assert.match(styles, /input, textarea[\s\S]*user-select: text/u);
+  assert.doesNotMatch(styles, /background-image:[^;]*SOUL/u);
   assert.match(app, /event\.ctrlKey \|\| event\.metaKey[\s\S]*event\.preventDefault/u);
   assert.match(patch, /exclusive video reply mapping/u);
   assert.match(patch, /d==="video"\?"video":"book"/u);
@@ -2938,8 +4056,13 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.doesNotMatch(patch, /\$listWaitingCondition|\$listWaitingReply|\$waitingCondition/u);
   assert.match(patch, /\$pollingStateTo/u);
   assert.match(patch, /\$processingIconTo/u);
-  assert.match(patch, /OliviaSoulPatch:mail-music-v13/u);
-  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v13/u);
+  assert.match(patch, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v25/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v26/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v24/u);
   assert.match(patch, /s\.isOfflineMode\?uo\(\)\.startPolling\(\)/u);
   assert.match(patch, /Ie\(\)\.isOfflineMode\|\|J\(\)/u);
   assert.match(patch, /ds\(\{pageSize:S\},\{hideToast:!0\}\)/u);
@@ -2948,5 +4071,5 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.match(bridge, /assertSoulExport/u);
   assert.match(bridge, /exportSoul/u);
   assert.match(controller, /Readable\.fromWeb[\s\S]*createWriteStream/u);
-  assert.match(controller, /process\.env\.PROGRAMDATA[\s\S]*transcriptionModelsDir[\s\S]*transcriptionTempDir/u);
+  assert.match(controller, /const transcriptionRoot = resolve\(this\.dataDir, "\.\."\)[\s\S]*transcriptionModelsDir[\s\S]*transcriptionTempDir/u);
 });

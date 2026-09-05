@@ -1,14 +1,15 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from "electron";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { createServer as createNetServer } from "node:net";
-import { dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { createOliviaService } from "../server.js";
+import { prepareWorkspaceIncrementally } from "./workspace-template.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const developmentRoot = resolve(here, "..", "..");
@@ -35,8 +36,31 @@ function adminUrl(port = currentPort) {
   return `http://127.0.0.1:${port}/admin`;
 }
 
+function loadingDocumentUrl(message = "正在启动本地服务，请稍候……") {
+  const html = `<!doctype html><meta charset="utf-8"><style>html,body{height:100%;margin:0;background:#111114;color:#eeeae4;font-family:Segoe UI,Microsoft YaHei UI,sans-serif}body{display:grid;place-items:center}.box{text-align:center}.mark{font-size:28px;letter-spacing:.08em}p{color:#85858b;font-size:13px}</style><body><div class="box"><div class="mark">OLIVIA SOUL</div><p>${message}</p></div></body>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
 function runtimeSettingsPath() {
   return join(app.getPath("userData"), "desktop-settings.json");
+}
+
+function desktopDataDir() {
+  return app.isPackaged ? join(app.getPath("userData"), "data") : join(resolve(here, ".."), "data");
+}
+
+async function installDownloadedUpdate(path) {
+  const target = resolve(String(path ?? ""));
+  const updatesRoot = resolve(desktopDataDir(), "updates");
+  const childPath = relative(updatesRoot, target);
+  if (!childPath || childPath.startsWith("..") || isAbsolute(childPath))
+    throw new Error("只能安装由 Olivia Soul 下载到本地数据目录的更新包");
+  if (extname(target).toLowerCase() !== ".exe") throw new Error("更新包必须是 .exe 安装程序");
+  await access(target);
+  const errorMessage = await shell.openPath(target);
+  if (errorMessage) throw new Error(errorMessage);
+  setTimeout(() => app.quit(), 600);
+  return { started: true, path: target };
 }
 
 async function readRuntimeSettings() {
@@ -150,9 +174,11 @@ async function selectedClientLayout() {
   for (const entry of await readdir(gameRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const feappPath = join(gameRoot, entry.name, "resources", "feapp.dat");
+    const webplayerPath = join(gameRoot, entry.name, "resources", "webplayer.dat");
     try {
       await access(feappPath);
-      candidates.push({ version: entry.name, feappPath });
+      await access(webplayerPath);
+      candidates.push({ version: entry.name, feappPath, webplayerPath });
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -169,6 +195,14 @@ async function readFeappStatus(feappPath) {
   return JSON.parse(output);
 }
 
+async function readWebplayerStatus(webplayerPath) {
+  const script = join(workspacePath(), "tools", "get-webplayer-status.ps1");
+  const output = await runProcess("powershell.exe", [
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-WebplayerPath", webplayerPath,
+  ]);
+  return JSON.parse(output);
+}
+
 async function getClientMountStatus() {
   const layout = await selectedClientLayout();
   if (!layout) {
@@ -180,10 +214,17 @@ async function getClientMountStatus() {
       servicePort: currentPort,
     };
   }
+  const [feapp, webplayer] = await Promise.all([
+    readFeappStatus(layout.feappPath),
+    readWebplayerStatus(layout.webplayerPath),
+  ]);
   return {
     clientSelected: true,
     clientExe: clientExePath,
-    ...(await readFeappStatus(layout.feappPath)),
+    ...feapp,
+    mounted: Boolean(feapp.mounted && webplayer.mounted),
+    webplayerFound: webplayer.clientFound,
+    webplayerMounted: webplayer.mounted,
     servicePort: currentPort,
   };
 }
@@ -208,6 +249,45 @@ async function selectClientExe() {
   return { ...(await getClientMountStatus()), selectionChanged: true };
 }
 
+async function nearestExistingDirectory(value) {
+  let candidate = String(value ?? "").trim();
+  if (!candidate) return "";
+  candidate = resolve(candidate);
+  while (candidate) {
+    try {
+      const info = await stat(candidate);
+      if (info.isDirectory()) return candidate;
+      candidate = dirname(candidate);
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") return "";
+      const parent = dirname(candidate);
+      if (parent === candidate) return "";
+      candidate = parent;
+    }
+  }
+  return "";
+}
+
+async function selectMidiLibraryFolder(initialPath = "") {
+  initialPath = await nearestExistingDirectory(initialPath);
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择 MIDI / MP4 曲库文件夹",
+    defaultPath: initialPath || undefined,
+    properties: ["openDirectory"],
+  });
+  if (result.canceled) return { cancelled: true };
+  return { cancelled: false, path: result.filePaths[0] };
+}
+
+async function openDirectory(value) {
+  const requested = resolve(String(value ?? "").trim());
+  const directory = await nearestExistingDirectory(requested);
+  if (!directory || directory !== requested) throw new Error("目录不存在或当前无法访问");
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  return { opened: true, path: directory };
+}
+
 async function originalFeapp(layout, createOnMount = false) {
   const key = createHash("md5").update(layout.gameRoot.toLowerCase(), "utf8").digest("hex");
   const backupDir = join(app.getPath("userData"), "client-backups");
@@ -226,12 +306,71 @@ async function originalFeapp(layout, createOnMount = false) {
   return managedBackup;
 }
 
+async function originalWebplayer(layout, createOnMount = false) {
+  const key = createHash("md5").update(`${layout.gameRoot.toLowerCase()}\n${layout.version.toLowerCase()}`, "utf8").digest("hex");
+  const backupDir = join(app.getPath("userData"), "client-backups");
+  const managedBackup = join(backupDir, `${key}.webplayer.dat`);
+  try {
+    await access(managedBackup);
+    if ((await readWebplayerStatus(managedBackup)).mounted) throw new Error("本机保存的桌面播放器原版备份无效");
+    return managedBackup;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (!createOnMount) throw new Error("未找到当前游戏版本的桌面播放器原版备份");
+  const current = await readWebplayerStatus(layout.webplayerPath);
+  if (current.mounted) throw new Error("当前桌面播放器已挂载，但没有挂载前的原版备份");
+  return managedBackup;
+}
+
 async function mountClientService(value) {
   const port = assertPort(value);
   const changed = port !== currentPort;
   const layout = await selectedClientLayout();
   if (!layout) throw new Error("请先选择游戏 exe");
+  const current = await readFeappStatus(layout.feappPath);
+  const currentWebplayer = await readWebplayerStatus(layout.webplayerPath);
+  if (current.updateAvailable) {
+    if (port !== currentPort) await assertPortAvailable(port);
+    const upgradeScript = join(workspacePath(), "tools", ["v22", "v23"].includes(current.revision)
+      ? "upgrade-feapp-v22-v23.ps1"
+      : "upgrade-feapp-v16-v17.ps1");
+    const upgradeArgs = [
+      "-GameRoot", layout.gameRoot,
+      "-Version", layout.version,
+      "-ServiceUrl", `http://127.0.0.1:${port}`,
+    ];
+    await runElevatedScript(upgradeScript, upgradeArgs);
+    if (currentWebplayer.updateAvailable) {
+      await runElevatedScript(join(workspacePath(), "tools", "upgrade-webplayer-v6-v7.ps1"), [
+        "-GameRoot", layout.gameRoot,
+        "-Version", layout.version,
+        "-ServiceUrl", `http://127.0.0.1:${port}`,
+      ]);
+    } else if (!currentWebplayer.mounted) {
+      const originalWebplayerFile = await originalWebplayer(layout, true);
+      await runElevatedScript(join(workspacePath(), "tools", "patch-webplayer-local.ps1"), [
+        "-GameRoot", layout.gameRoot,
+        "-Version", layout.version,
+        "-OriginalFile", originalWebplayerFile,
+        "-RefreshOriginal", "true",
+      ]);
+    }
+    try {
+      await changeServicePort(port);
+    } catch (error) {
+      if (port !== currentPort) {
+        upgradeArgs[upgradeArgs.length - 1] = `http://127.0.0.1:${currentPort}`;
+        await runElevatedScript(upgradeScript, upgradeArgs);
+      }
+      throw error;
+    }
+    const status = await getClientMountStatus();
+    if (changed) setTimeout(() => mainWindow.loadURL(adminUrl()), 250);
+    return status;
+  }
   const originalFile = await originalFeapp(layout, true);
+  const originalWebplayerFile = await originalWebplayer(layout, true);
   if (port !== currentPort) await assertPortAvailable(port);
   const patchScript = join(workspacePath(), "tools", "patch-feapp-local.ps1");
   const patchArgs = [
@@ -241,6 +380,11 @@ async function mountClientService(value) {
     "-ServiceUrl", `http://127.0.0.1:${port}`,
   ];
   await runElevatedScript(patchScript, patchArgs);
+  await runElevatedScript(join(workspacePath(), "tools", "patch-webplayer-local.ps1"), [
+    "-GameRoot", layout.gameRoot,
+    "-Version", layout.version,
+    "-OriginalFile", originalWebplayerFile,
+  ]);
   try {
     await changeServicePort(port);
   } catch (error) {
@@ -263,11 +407,17 @@ async function restoreClient() {
   const layout = await selectedClientLayout();
   if (!layout) throw new Error("请先选择游戏 exe");
   const originalFile = await originalFeapp(layout);
+  const originalWebplayerFile = await originalWebplayer(layout);
   const restoreScript = join(workspacePath(), "tools", "restore-feapp-original.ps1");
   await runElevatedScript(restoreScript, [
     "-GameRoot", layout.gameRoot,
     "-Version", layout.version,
     "-OriginalFile", originalFile,
+  ]);
+  await runElevatedScript(join(workspacePath(), "tools", "restore-webplayer-original.ps1"), [
+    "-GameRoot", layout.gameRoot,
+    "-Version", layout.version,
+    "-OriginalFile", originalWebplayerFile,
   ]);
   return getClientMountStatus();
 }
@@ -313,9 +463,10 @@ function createTray(windowIcon) {
 }
 
 function createWindow(windowIcon) {
+  const workAreaSize = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
-    width: 1298,
-    height: 858,
+    width: Math.min(1120, Math.max(820, workAreaSize.width - 160)),
+    height: Math.min(720, Math.max(620, workAreaSize.height - 160)),
     minWidth: 820,
     minHeight: 620,
     show: false,
@@ -329,7 +480,18 @@ function createWindow(windowIcon) {
       sandbox: false,
     },
   });
-  mainWindow.loadURL(adminUrl());
+  mainWindow.loadURL(loadingDocumentUrl());
+  mainWindow.webContents.on("context-menu", (event, params) => {
+    event.preventDefault();
+    if (!params.isEditable) return;
+    Menu.buildFromTemplate([
+      { role: "cut", label: "剪切" },
+      { role: "copy", label: "复制" },
+      { role: "paste", label: "粘贴" },
+      { type: "separator" },
+      { role: "selectAll", label: "全选" },
+    ]).popup({ window: mainWindow });
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/u.test(url)) shell.openExternal(url);
     return { action: "deny" };
@@ -359,20 +521,17 @@ function createWindow(windowIcon) {
 async function packagedWorkspace() {
   const root = join(app.getPath("userData"), "workspace");
   const template = join(process.resourcesPath, "workspace-template");
-  await mkdir(root, { recursive: true });
-  await cp(join(template, ".cursor", "skills"), join(root, ".cursor", "skills"), { recursive: true, force: true });
-  await rm(join(root, ".cursor", "rules"), { recursive: true, force: true });
-  await cp(join(template, "harness"), join(root, "harness"), { recursive: true, force: true });
-  await cp(join(template, "tools"), join(root, "tools"), { recursive: true, force: true });
-  await cp(join(template, "林离人设.md"), join(root, "林离人设.md"), { force: true });
-  await mkdir(join(root, "信件往来"), { recursive: true });
-  await mkdir(join(root, "信件往来_原始语料"), { recursive: true });
+  await prepareWorkspaceIncrementally({
+    template,
+    root,
+    settings: join(app.getPath("userData"), "settings"),
+  });
   return root;
 }
 
 async function createOwnedBackend(port) {
   const root = app.isPackaged ? await packagedWorkspace() : developmentRoot;
-  const dataDir = app.isPackaged ? join(app.getPath("userData"), "data") : join(resolve(here, ".."), "data");
+  const dataDir = desktopDataDir();
   const nextService = await createOliviaService({ root, dataDir });
   try {
     await nextService.listen(port, "127.0.0.1");
@@ -487,10 +646,13 @@ if (!singleInstance) {
   }));
   ipcMain.handle("desktop:set-auto-start", async (_event, enabled) => ({ autoStart: await setAutoStart(enabled === true) }));
   ipcMain.handle("client:select", () => selectClientExe());
+  ipcMain.handle("midi:select-library", (_event, initialPath) => selectMidiLibraryFolder(initialPath));
+  ipcMain.handle("desktop:open-directory", (_event, path) => openDirectory(path));
   ipcMain.handle("client:get-status", () => getClientMountStatus());
   ipcMain.handle("client:mount", (_event, port) => mountClientService(port));
   ipcMain.handle("client:restore", () => restoreClient());
   ipcMain.handle("desktop:export-soul", () => exportSoul());
+  ipcMain.handle("desktop:install-update", (_event, path) => installDownloadedUpdate(path));
   ipcMain.handle("desktop:hide", () => mainWindow.hide());
   app.whenReady().then(async () => {
     try {
@@ -498,15 +660,21 @@ if (!singleInstance) {
       const settings = await readRuntimeSettings();
       currentPort = settings.port;
       clientExePath = settings.clientExe;
-      await startBackend(currentPort);
-      await refreshAutoStart();
       const windowIcon = await executableWindowIcon();
       createTray(windowIcon);
       createWindow(windowIcon);
+      await startBackend(currentPort);
+      await refreshAutoStart();
+      await mainWindow.loadURL(adminUrl());
     } catch (error) {
-      dialog.showErrorBox("Olivia 本机信件启动失败", error.message);
       backendClosed = true;
-      app.quit();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await mainWindow.loadURL(loadingDocumentUrl(`本地服务启动失败：${error.message}`));
+        if (!hiddenAtLaunch) showWindow();
+      } else {
+        dialog.showErrorBox("Olivia 本机信件启动失败", error.message);
+        app.quit();
+      }
     }
   });
 }

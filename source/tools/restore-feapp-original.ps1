@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$GameRoot,
     [Parameter(Mandatory = $true)][string]$Version,
-    [Parameter(Mandatory = $true)][string]$OriginalFile
+    [Parameter(Mandatory = $true)][string]$OriginalFile,
+    [switch]$RestoreStudioUi,
+    [switch]$RestoreContainerPlugin
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,28 +11,26 @@ $ErrorActionPreference = "Stop"
 $relative = "$Version\resources\feapp.dat"
 $destination = Join-Path $GameRoot $relative
 if (-not (Test-Path -LiteralPath $OriginalFile)) { throw "original feapp.dat not found" }
-Stop-GameProcesses $GameRoot
-Start-Sleep -Milliseconds 250
-Copy-Item -LiteralPath $OriginalFile -Destination $destination -Force
-$nutBasePath = Join-Path $GameRoot "$Version\NutBase.dll"
-$nutBackup = Join-Path ([IO.Path]::GetDirectoryName($OriginalFile)) ("NutBase-" + $Version + ".dll")
-if (Test-Path -LiteralPath $nutBackup) {
-    Copy-Item -LiteralPath $nutBackup -Destination $nutBasePath -Force
-}
 $studioUiPath = Join-Path $GameRoot "$Version\plugins\Studio\NutStudioUI.dll"
 $studioBackup = Join-Path ([IO.Path]::GetDirectoryName($OriginalFile)) ("NutStudioUI-" + $Version + ".dll")
-if ((Test-Path -LiteralPath $studioBackup) -and (Test-Path -LiteralPath $studioUiPath)) {
-    Copy-Item -LiteralPath $studioBackup -Destination $studioUiPath -Force
+if ($RestoreStudioUi) {
+    if (-not (Test-Path -LiteralPath $studioBackup -PathType Leaf)) { throw "registered NutStudioUI.dll backup missing" }
+    if (-not (Test-Path -LiteralPath $studioUiPath -PathType Leaf)) { throw "registered NutStudioUI.dll target missing" }
 }
 $containerPluginPath = Join-Path $GameRoot "$Version\plugins\Container\NutContainerPlugin.dll"
 $containerPluginBackup = Join-Path ([IO.Path]::GetDirectoryName($OriginalFile)) ("NutContainerPlugin-" + $Version + ".dll")
-if ((Test-Path -LiteralPath $containerPluginBackup) -and (Test-Path -LiteralPath $containerPluginPath)) {
-    Copy-Item -LiteralPath $containerPluginBackup -Destination $containerPluginPath -Force
+if ($RestoreContainerPlugin) {
+    if (-not (Test-Path -LiteralPath $containerPluginBackup -PathType Leaf)) { throw "registered NutContainerPlugin.dll backup missing" }
+    if (-not (Test-Path -LiteralPath $containerPluginPath -PathType Leaf)) { throw "registered NutContainerPlugin.dll target missing" }
 }
-$userSettingsPath = Join-Path $env:APPDATA "miHoYo\Olivia-steam\store\usersettings.dat"
-$settingsBackup = Join-Path ([IO.Path]::GetDirectoryName($OriginalFile)) ("usersettings-" + $Version + ".dat")
-if ((Test-Path -LiteralPath $settingsBackup) -and (Test-Path -LiteralPath $userSettingsPath)) {
-    Copy-Item -LiteralPath $settingsBackup -Destination $userSettingsPath -Force
+Stop-GameProcesses $GameRoot
+Start-Sleep -Milliseconds 250
+Copy-Item -LiteralPath $OriginalFile -Destination $destination -Force
+if ($RestoreStudioUi) {
+    Copy-Item -LiteralPath $studioBackup -Destination $studioUiPath -Force
+}
+if ($RestoreContainerPlugin) {
+    Copy-Item -LiteralPath $containerPluginBackup -Destination $containerPluginPath -Force
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
 Write-Output "restored=$destination"

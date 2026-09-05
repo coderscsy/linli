@@ -39,7 +39,17 @@ $endpoints = @(
     "/letter/resend",
     "/addToPlaylist",
     "/delFromPlaylist",
-    "/searchPlaylist"
+    "/searchPlaylist",
+    "/genObjectUploadUrl",
+    "/midi/generate",
+    "/midi/getGenerateResult",
+    "/midi/cancelGenerate",
+    "/midi/deleteJob",
+    "/midi/listJobs",
+    "/midi/batchGetResult",
+    "/midi/importShareCode",
+    "/deleteUserSong",
+    "/searchUserSongs"
 )
 $ports = New-Object System.Collections.Generic.List[int]
 $complete = $true
@@ -53,10 +63,32 @@ foreach ($endpoint in $endpoints) {
     $ports.Add([int]$matches[0].Groups[1].Value)
 }
 $uniquePorts = @($ports | Select-Object -Unique)
-$patchMarkers = @(
-    '/*OliviaSoulPatch:mail-music-v13*/'
+$currentMarker = '/*OliviaSoulPatch:mail-music-v31*/'
+$knownMarkers = @(
+    $currentMarker,
+    '/*OliviaSoulPatch:mail-music-v30*/',
+    '/*OliviaSoulPatch:mail-music-v29*/',
+    '/*OliviaSoulPatch:mail-music-v28*/',
+    '/*OliviaSoulPatch:mail-music-v27*/',
+    '/*OliviaSoulPatch:mail-music-v26*/',
+    '/*OliviaSoulPatch:mail-music-v25*/',
+    '/*OliviaSoulPatch:mail-music-v24*/',
+    '/*OliviaSoulPatch:mail-music-v23*/',
+    '/*OliviaSoulPatch:mail-music-v22*/',
+    '/*OliviaSoulPatch:mail-music-v20*/',
+    '/*OliviaSoulPatch:mail-music-v19*/',
+    '/*OliviaSoulPatch:mail-music-v18*/',
+    '/*OliviaSoulPatch:mail-music-v17*/',
+    '/*OliviaSoulPatch:mail-music-v16*/',
+    '/*OliviaSoulPatch:mail-music-v15*/',
+    '/*OliviaSoulPatch:mail-music-v14*/'
 )
-$mounted = $complete -and $uniquePorts.Count -eq 1 -and @($patchMarkers | Where-Object { $text.StartsWith($_) }).Count -eq 1
+$activeMarker = @($knownMarkers | Where-Object { $text.StartsWith($_) } | Select-Object -First 1)
+$managed = $complete -and $uniquePorts.Count -eq 1 -and $activeMarker.Count -eq 1
+$mounted = $managed -and $activeMarker[0] -eq $currentMarker
+$updateAvailable = $managed -and -not $mounted
 $port = $null
-if ($mounted) { $port = $uniquePorts[0] }
-[ordered]@{ clientFound = $true; mounted = $mounted; port = $port } | ConvertTo-Json -Compress
+if ($managed) { $port = $uniquePorts[0] }
+$revision = $null
+if ($managed) { $revision = [regex]::Match($activeMarker[0], 'v\d+').Value }
+[ordered]@{ clientFound = $true; mounted = $mounted; managed = $managed; updateAvailable = $updateAvailable; revision = $revision; port = $port } | ConvertTo-Json -Compress

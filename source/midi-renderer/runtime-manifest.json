@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-01",
+  "defaultInstallRoot": "I:\\OliviaSoulData\\MidiRenderer",
+  "packages": [
+    {
+      "id": "godot",
+      "version": "4.7-stable",
+      "filename": "Godot_v4.7-stable_win64.exe.zip",
+      "url": "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_win64.exe.zip",
+      "sha256": "02a5312236f4e0209c78bcb2f52135b1963e6b8888c873c9cee81459e60bcd71",
+      "archive": "zip",
+      "stripSingleDirectory": false,
+      "installPath": "runtime\\godot",
+      "sourceExecutable": "Godot_v4.7-stable_win64.exe",
+      "executablePath": "godot.exe",
+      "verifyArguments": ["--version"],
+      "license": "MIT",
+      "licenseUrl": "https://github.com/godotengine/godot/blob/4.7-stable/LICENSE.txt"
+    },
+    {
+      "id": "fluidsynth",
+      "version": "2.5.4",
+      "filename": "fluidsynth-v2.5.4-win10-x64-cpp11.zip",
+      "url": "https://github.com/FluidSynth/fluidsynth/releases/download/v2.5.4/fluidsynth-v2.5.4-win10-x64-cpp11.zip",
+      "sha256": "cc8959425acdcf09d3af546e77f22072857af8d8ecec2c38972bc8d9cc188e60",
+      "archive": "zip",
+      "stripSingleDirectory": true,
+      "installPath": "runtime\\fluidsynth",
+      "sourceExecutable": "fluidsynth.exe",
+      "executablePath": "bin\\fluidsynth.exe",
+      "verifyArguments": ["--version"],
+      "license": "LGPL-2.1-or-later",
+      "licenseUrl": "https://github.com/FluidSynth/fluidsynth/blob/v2.5.4/LICENSE"
+    },
+    {
+      "id": "ffmpeg",
+      "version": "n9.0.1-11-ge47273f4d9",
+      "filename": "ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-29-13-12/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip",
+      "sha256": "30bac4e9cd39dbd0873077c15afec858c69a31a195b1b41388a62f4de368f3ea",
+      "archive": "zip",
+      "stripSingleDirectory": true,
+      "installPath": "runtime\\ffmpeg",
+      "sourceExecutable": "ffmpeg.exe",
+      "executablePath": "bin\\ffmpeg.exe",
+      "additionalExecutables": ["ffprobe.exe"],
+      "verifyArguments": ["-version"],
+      "license": "GPL-3.0-or-later build",
+      "licenseUrl": "https://github.com/BtbN/FFmpeg-Builds/blob/master/LICENSE"
+    },
+    {
+      "id": "musescore-general",
+      "version": "0.2",
+      "filename": "MuseScore_General.sf3",
+      "url": "https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3",
+      "sha256": "5b85b6c2c61d10b2b91cddd41efcce7b25cd31c8271d511c73afafbef20b6fa3",
+      "archive": "none",
+      "installPath": "soundfonts\\MuseScore_General.sf3",
+      "license": "MIT",
+      "licenseUrl": "https://musescore.org/en/handbook/2/soundfonts-and-sfz-files"
+    }
+  ]
+}

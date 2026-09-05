@@ -39,7 +39,7 @@ test("模型档案从旧 DeepSeek 配置迁移且两套配置互不覆盖", asyn
   assert.deepEqual(before.profiles.local, {
     provider: "local",
     baseUrl: "http://127.0.0.1:8000/v1",
-    model: "gemma-4-26b-a4b-it-ultra-uncensored-heretic",
+    model: "local-model",
     authMode: "none",
     apiKey: "",
     keyConfigured: false,
@@ -140,4 +140,32 @@ test("模型档案拒绝非法 provider 地址换行和缺失的 Bearer 密钥",
     authMode: "bearer",
     apiKey: "",
   }, { messages: [] }), /API Key/u);
+});
+
+test("重置模型配置只删除两个模型文件并返回中性状态", async t => {
+  const root = await mkdtemp(join(tmpdir(), "olivia-model-reset-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const secrets = join(root, ".cursor", "secrets");
+  await mkdir(join(root, "database"), { recursive: true });
+  await mkdir(join(root, "信件往来"), { recursive: true });
+  await mkdir(secrets, { recursive: true });
+  await writeFile(join(secrets, "model.env"), "MODEL_ACTIVE_PROVIDER=local\nMODEL_LOCAL_MODEL=private-model\n", "utf8");
+  await writeFile(join(secrets, "deepseek.env"), "DEEPSEEK_API_KEY=private-key\n", "utf8");
+  await writeFile(join(secrets, "keep.txt"), "保留秘密目录中的其他文件", "utf8");
+  await writeFile(join(root, "database", "olivia-local.sqlite"), "database-sentinel", "utf8");
+  await writeFile(join(root, "信件往来", "用户.md"), "letter-sentinel", "utf8");
+
+  const modelModule = await import("../model-config.js");
+  assert.equal(typeof modelModule.resetModelConfig, "function", "model-config must expose a narrow reset operation");
+  const reset = await modelModule.resetModelConfig({ root });
+
+  await assert.rejects(readFile(join(secrets, "model.env")), error => error.code === "ENOENT");
+  await assert.rejects(readFile(join(secrets, "deepseek.env")), error => error.code === "ENOENT");
+  assert.equal(await readFile(join(secrets, "keep.txt"), "utf8"), "保留秘密目录中的其他文件");
+  assert.equal(await readFile(join(root, "database", "olivia-local.sqlite"), "utf8"), "database-sentinel");
+  assert.equal(await readFile(join(root, "信件往来", "用户.md"), "utf8"), "letter-sentinel");
+  assert.equal(reset.activeProvider, "deepseek");
+  assert.equal(reset.profiles.deepseek.keyConfigured, false);
+  assert.equal(reset.profiles.local.baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(reset.profiles.local.model, "local-model");
 });

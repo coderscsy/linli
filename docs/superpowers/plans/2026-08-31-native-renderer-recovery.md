@@ -10,11 +10,11 @@
 
 ## Global Constraints
 
-- Repository changes stay under `I:\Tools\OliviaSoul-reference-2b56a78e`.
-- Runtime evidence, renderer assets, caches, and outputs stay under `I:\OliviaSoulData\MidiRenderer`.
-- The Steam install `Z:\SteamLibrary\steamapps\common\BSide Olivia Lin Test` and backup `I:\Backups\BSide-Olivia-Lin-2026-08-31` are read-only inputs during Stage 1A.
+- Repository changes stay under `<源码目录>`.
+- Runtime evidence, renderer assets, caches, and outputs stay under `<用户指定的探测数据目录>`.
+- The Steam install `<游戏安装目录>` and backup `<用户备份目录>` are read-only inputs during Stage 1A.
 - Do not move, delete, rename, patch, or launch files discovered by the scanner.
-- Do not write large files under `C:\Users\sycan`; AppData is scan-only.
+- Do not write large files under `C:\Users\YOUR_NAME`; AppData is scan-only.
 - Do not log request headers, `x-token`, model gateway tokens, JWTs, mobile numbers, or other credentials.
 - Do not bypass DRM, account permissions, Steam ownership, or acquire renderer assets from untrusted redistribution sources.
 - Stage 1A exits cleanly as `blocked_missing_renderer` when no complete renderer is found; it must not fabricate readiness.
@@ -40,9 +40,9 @@
 
 Runtime-only output, never committed:
 
-- `I:\OliviaSoulData\MidiRenderer\evidence\stage1a-report.json`
-- `I:\OliviaSoulData\MidiRenderer\evidence\stage1a-report.md`
-- `I:\OliviaSoulData\MidiRenderer\evidence\binary-protocol-evidence.json`
+- `<用户指定的探测数据目录>\evidence\stage1a-report.json`
+- `<用户指定的探测数据目录>\evidence\stage1a-report.md`
+- `<用户指定的探测数据目录>\evidence\binary-protocol-evidence.json`
 
 ## Task 1: I-drive layout and secret redaction
 
@@ -104,7 +104,7 @@ test("containment rejects path traversal", () => {
 
 - [ ] **Step 3: Run layout tests and verify failure**
 
-Run: `cd /d I:\Tools\OliviaSoul-reference-2b56a78e\source\renderer-probe && node --test test/layout.test.js`
+Run: `cd /d <源码目录>\source\renderer-probe && node --test test/layout.test.js`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `src/layout.js`.
 
@@ -515,11 +515,11 @@ Import `runCli` and invoke it against temporary fixture roots with the dependenc
 
 ```text
 node src/cli.js scan \
-  --data-root I:\OliviaSoulData\MidiRenderer \
-  --game-root "Z:\SteamLibrary\steamapps\common\BSide Olivia Lin Test" \
-  --backup-root I:\Backups\BSide-Olivia-Lin-2026-08-31 \
-  --appdata-root "C:\Users\sycan\AppData\Roaming\miHoYo\Olivia-steam" \
-  --steamapps-root Z:\SteamLibrary\steamapps
+  --data-root <用户指定的探测数据目录> \
+  --game-root "<游戏安装目录>" \
+  --backup-root <用户备份目录> \
+  --appdata-root "C:\Users\YOUR_NAME\AppData\Roaming\miHoYo\Olivia-steam" \
+  --steamapps-root <Steam库目录>
 ```
 
 Reject unknown flags and missing values. The fixed scan roots are `game-root`, `backup-root`, and `appdata-root`; the last is read-only. Binary evidence inputs are:
@@ -554,9 +554,9 @@ git commit -m "feat: report renderer recovery readiness"
 **Files:**
 - Create: `source/renderer-probe/README.md`
 - Modify: `source/README.md`
-- Runtime create: `I:\OliviaSoulData\MidiRenderer\evidence\stage1a-report.json`
-- Runtime create: `I:\OliviaSoulData\MidiRenderer\evidence\stage1a-report.md`
-- Runtime create: `I:\OliviaSoulData\MidiRenderer\evidence\binary-protocol-evidence.json`
+- Runtime create: `<用户指定的探测数据目录>\evidence\stage1a-report.json`
+- Runtime create: `<用户指定的探测数据目录>\evidence\stage1a-report.md`
+- Runtime create: `<用户指定的探测数据目录>\evidence\binary-protocol-evidence.json`
 
 **Interfaces:**
 - Consumes: CLI from Task 5.
@@ -581,8 +581,8 @@ Add a “原生渲染器可行性探测” paragraph pointing to `renderer-probe
 Run:
 
 ```powershell
-$game = 'Z:\SteamLibrary\steamapps\common\BSide Olivia Lin Test'
-$backup = 'I:\Backups\BSide-Olivia-Lin-2026-08-31'
+$game = '<游戏安装目录>'
+$backup = '<用户备份目录>'
 Get-FileHash -Algorithm SHA256 -LiteralPath `
   "$game\version.json", `
   "$game\0.0.9.627\plugins\Studio\NutLivePlayer.dll", `
@@ -597,13 +597,13 @@ Save the console output in the implementation turn notes; do not write it into e
 - [ ] **Step 4: Run the real scan from the I-drive project**
 
 ```powershell
-Set-Location 'I:\Tools\OliviaSoul-reference-2b56a78e\source\renderer-probe'
+Set-Location '<源码目录>\source\renderer-probe'
 node src/cli.js scan `
-  --data-root 'I:\OliviaSoulData\MidiRenderer' `
-  --game-root 'Z:\SteamLibrary\steamapps\common\BSide Olivia Lin Test' `
-  --backup-root 'I:\Backups\BSide-Olivia-Lin-2026-08-31' `
-  --appdata-root 'C:\Users\sycan\AppData\Roaming\miHoYo\Olivia-steam' `
-  --steamapps-root 'Z:\SteamLibrary\steamapps'
+  --data-root '<用户指定的探测数据目录>' `
+  --game-root '<游戏安装目录>' `
+  --backup-root '<用户备份目录>' `
+  --appdata-root 'C:\Users\YOUR_NAME\AppData\Roaming\miHoYo\Olivia-steam' `
+  --steamapps-root '<Steam库目录>'
 ```
 
 Expected: exit `0` with `candidate_ready` if a structurally complete `TPRender` is found; otherwise exit `2` with `blocked_missing_renderer`. Exit `2` is the expected result for the currently observed machine state and is not converted into a success claim.
@@ -611,7 +611,7 @@ Expected: exit `0` with `candidate_ready` if a structurally complete `TPRender` 
 - [ ] **Step 5: Verify report redaction and I-drive containment**
 
 ```powershell
-$evidence = 'I:\OliviaSoulData\MidiRenderer\evidence'
+$evidence = '<用户指定的探测数据目录>\evidence'
 rg -n -i 'x-token|authorization|model_gateway_token|Bearer |eyJ[A-Za-z0-9_-]+\.' $evidence
 if ($LASTEXITCODE -eq 0) { throw 'evidence contains a possible credential' }
 Get-ChildItem -LiteralPath $evidence -File |
@@ -631,9 +631,9 @@ Run the Step 3 command again and compare every SHA-256. Expected: all hashes exa
 - [ ] **Step 7: Run regression tests**
 
 ```powershell
-Set-Location 'I:\Tools\OliviaSoul-reference-2b56a78e\source\renderer-probe'
+Set-Location '<源码目录>\source\renderer-probe'
 npm test
-Set-Location 'I:\Tools\OliviaSoul-reference-2b56a78e\source\local-service'
+Set-Location '<源码目录>\source\local-service'
 npm test
 ```
 
@@ -642,7 +642,7 @@ Expected: renderer-probe tests and the existing OliviaSoul local-service suite a
 - [ ] **Step 8: Commit documentation**
 
 ```powershell
-Set-Location 'I:\Tools\OliviaSoul-reference-2b56a78e'
+Set-Location '<源码目录>'
 git add source/renderer-probe/README.md source/README.md
 git commit -m "docs: document native renderer recovery probe"
 ```

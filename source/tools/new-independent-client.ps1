@@ -11,7 +11,6 @@ $ErrorActionPreference = "Stop"
 $Version = "0.0.9.627"
 $FeappRelativePath = "$Version/resources/feapp.dat"
 $KnownCleanFeappSha256 = "C88F1DD4CB7C95E4902D74DD0C247962FFD65559E3907497B416078D3A6698B5"
-$KnownMountedFeappSha256 = "CE3BAFFE655289919242F2162987EB759ADDDC846661E59ECAC3A1F774134429"
 $Utf8NoBom = New-Object Text.UTF8Encoding $false
 $IndependentDirectoryError = [Text.Encoding]::UTF8.GetString(
     [Convert]::FromBase64String("55uu5qCH5b+F6aG75piv5LiO5ri45oiP5rqQ55uu5b2V5YiG56a755qE54us56uL55uu5b2V"))
@@ -74,10 +73,16 @@ if (-not (Test-Path -LiteralPath $mountedFeapp)) {
 }
 $cleanFeappSha256 = Get-Sha256 $clean
 $mountedFeappSha256 = Get-Sha256 $mountedFeapp
-if (-not $TestFixture -and
-    (-not $cleanFeappSha256.Equals($KnownCleanFeappSha256, [StringComparison]::OrdinalIgnoreCase) -or
-     -not $mountedFeappSha256.Equals($KnownMountedFeappSha256, [StringComparison]::OrdinalIgnoreCase))) {
-    throw "front end hash mismatch for the supported client"
+if (-not $TestFixture) {
+    if (-not $cleanFeappSha256.Equals($KnownCleanFeappSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "front end hash mismatch for the supported client"
+    }
+    $versionFile = Join-Path $game "version.json"
+    if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) { throw "supported client version.json is missing" }
+    $versionInfo = Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$versionInfo.client -ne "ToyPianist-win-x64-rel-v$Version") {
+        throw "unsupported client build: $($versionInfo.client)"
+    }
 }
 
 $sourceEntries = @()

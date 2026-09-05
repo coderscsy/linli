@@ -11,5 +11,8 @@
   },
   "engines": {
     "node": ">=22.5"
+  },
+  "dependencies": {
+    "midi-file": "1.2.4"
   }
 }

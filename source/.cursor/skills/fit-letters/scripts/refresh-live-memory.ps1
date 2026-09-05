@@ -48,9 +48,13 @@ $script:summaryJobs = @()
 $script:summaryValues = $summaries
 $script:summaryCompleted = $completed
 function Receive-SummaryJob {
-    $job = Wait-Job -Job $script:summaryJobs -Any
+    $job = $null
+    while ($null -eq $job) {
+        $job = @($script:summaryJobs | Where-Object { $_.Async.IsCompleted }) | Select-Object -First 1
+        if ($null -eq $job) { Start-Sleep -Milliseconds 10 }
+    }
     try {
-        $items = @(Receive-Job -Job $job -ErrorAction Stop)
+        $items = @($job.PowerShell.EndInvoke($job.Async))
         $result = @($items | Where-Object { $_.PSObject.Properties["letterId"] }) | Select-Object -Last 1
         if ($null -eq $result) { throw "summary job returned no result" }
         $summary = ([string]$result.summary).Trim()
@@ -60,12 +64,14 @@ function Receive-SummaryJob {
         Write-Output ("MEMORY_PROGRESS|summaries|{0}|{1}" -f $script:summaryCompleted, $exchanges.Count)
     }
     finally {
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-        $script:summaryJobs = @($script:summaryJobs | Where-Object { $_.Id -ne $job.Id })
+        $job.PowerShell.Dispose()
+        $script:summaryJobs = @($script:summaryJobs | Where-Object { $_ -ne $job })
     }
 }
 
 $dsCallPath = Join-Path $PSScriptRoot "ds-call.ps1"
+$summaryRunspaces = [RunspaceFactory]::CreateRunspacePool(1, 8)
+$summaryRunspaces.Open()
 try {
     foreach ($exchange in $pending) {
         $user = @"
@@ -77,7 +83,9 @@ $($exchange.incoming)
 她（回信）：
 $($exchange.reply)
 "@
-        $script:summaryJobs += Start-Job -ScriptBlock {
+        $powerShell = [PowerShell]::Create()
+        $powerShell.RunspacePool = $summaryRunspaces
+        [void]$powerShell.AddScript({
             param($DsCallPath, $Root, $System, $User, $LetterId)
             . $DsCallPath
             Initialize-Ds -Root $Root
@@ -85,14 +93,22 @@ $($exchange.reply)
                 letterId = $LetterId
                 summary = (Invoke-Ds -System $System -User $User).Trim()
             }
-        } -ArgumentList $dsCallPath, $Root, $summarySystem, $user, ([string]$exchange.letterId)
+        }).AddArgument($dsCallPath).AddArgument($Root).AddArgument($summarySystem).AddArgument($user).AddArgument(([string]$exchange.letterId))
+        $script:summaryJobs += [pscustomobject]@{
+            PowerShell = $powerShell
+            Async = $powerShell.BeginInvoke()
+        }
         if ($script:summaryJobs.Count -ge 8) { Receive-SummaryJob }
     }
     while ($script:summaryJobs.Count -gt 0) { Receive-SummaryJob }
 }
 finally {
-    $script:summaryJobs | Stop-Job -ErrorAction SilentlyContinue
-    $script:summaryJobs | Remove-Job -Force -ErrorAction SilentlyContinue
+    foreach ($job in $script:summaryJobs) {
+        try { $job.PowerShell.Stop() } catch {}
+        $job.PowerShell.Dispose()
+    }
+    $summaryRunspaces.Close()
+    $summaryRunspaces.Dispose()
 }
 
 $completed = $script:summaryCompleted

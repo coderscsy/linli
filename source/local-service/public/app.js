@@ -10,6 +10,16 @@ let transcriptionSelection = null;
 let transcriptionJobId = null;
 let remoteMemoryJobId = null;
 let modelConfiguration = null;
+let midiLibraryPreviewId = null;
+let midiStatusSnapshot = null;
+let updateInformation = null;
+let storageMigrationPreview = null;
+let storageMigrationPreviewJobId = null;
+let storageMigrationPollTimer = null;
+let clientMountSnapshot = null;
+let clientMountAction = null;
+let clientMountGeneration = 0;
+let clientMountStatusRequest = 0;
 const safely = handler => async event => {
   try {
     await handler(event);
@@ -17,6 +27,23 @@ const safely = handler => async event => {
     showError(error);
   }
 };
+
+async function runModelOperation({ buttonSelector, resultSelector, pendingText, successText, failureText, operation }) {
+  const button = $(buttonSelector);
+  const resultTarget = $(resultSelector);
+  button.disabled = true;
+  resultTarget.textContent = pendingText;
+  try {
+    const result = await operation();
+    resultTarget.textContent = typeof successText === "function" ? successText(result) : successText;
+    return result;
+  } catch (error) {
+    resultTarget.textContent = `${failureText}：${String(error?.message ?? error ?? "未知错误")}`;
+    throw error;
+  } finally {
+    button.disabled = false;
+  }
+}
 
 function closeNotice(result) {
   const resolver = noticeResolver;
@@ -171,13 +198,28 @@ function renderMemoryStatus(status) {
     loadMemory().catch(showError);
 }
 
+function updateClientMountButtons() {
+  const busy = clientMountAction !== null;
+  $("#mountService").disabled = busy || !clientMountSnapshot?.clientSelected;
+  $("#restoreClient").disabled = busy || !clientMountSnapshot?.clientSelected;
+  $("#selectClient").disabled = busy;
+}
+
 function renderClientMountStatus(status) {
+  // A status snapshot is not proof that an unresolved desktop write has stopped.
+  if (clientMountAction) { updateClientMountButtons(); return; }
+  clientMountSnapshot = status;
   const badge = $("#serviceMountStatus");
+  const partiallyMounted = !status.mounted && (status.feappMounted === true || status.webplayerMounted === true);
   $("#clientExe").value = status.clientExe ?? "";
-  badge.className = `mountStatus ${status.mounted ? "mounted" : "unmounted"}`;
-  badge.textContent = status.mounted ? "服务已挂载" : "服务未挂载";
+  badge.className = `mountStatus ${status.mounted || partiallyMounted ? "mounted" : "unmounted"}`;
+  badge.textContent = partiallyMounted ? "服务部分挂载" : status.mounted ? "服务已挂载" : "服务未挂载";
   if (!status.clientSelected) {
     $("#serviceMountDetail").textContent = "请先选择游戏 exe";
+  } else if (partiallyMounted) {
+    $("#serviceMountDetail").textContent = `客户端状态不一致：FE ${status.feappMounted ? "已挂载" : "未挂载"}，WP ${status.webplayerMounted ? "已挂载" : "未挂载"}`;
+  } else if (status.updateAvailable) {
+    $("#serviceMountDetail").textContent = `检测到旧版客户端补丁 ${status.revision ?? ""}，请更新后再启动游戏`;
   } else if (status.mounted) {
     const synchronized = status.port === status.servicePort;
     $("#serviceMountDetail").textContent = synchronized
@@ -186,10 +228,96 @@ function renderClientMountStatus(status) {
   } else {
     $("#serviceMountDetail").textContent = `客户端使用原服务，本机服务端口 ${status.servicePort}`;
   }
-  $("#mountService").hidden = status.mounted;
-  $("#restoreClient").hidden = !status.mounted;
-  $("#mountService").disabled = !status.clientSelected;
-  $("#restoreClient").disabled = !status.clientSelected;
+  $("#mountService").hidden = status.mounted && !status.updateAvailable;
+  $("#mountService").textContent = status.updateAvailable ? "更新客户端补丁" : "启用本地服务";
+  $("#restoreClient").hidden = !status.mounted && !partiallyMounted;
+  updateClientMountButtons();
+}
+
+function clientMountErrorMessage(error) {
+  return String(error?.message ?? error ?? "未知错误").split(/[\r\n]/u)[0]
+    .replace(/Bearer\s+\S+/giu, "Bearer [已隐藏]")
+    .replace(/((?:api[_ -]?key|token|password|authorization)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu, "$1[已隐藏]")
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/giu, "$1[已隐藏]@")
+    .replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240) || "未知错误";
+}
+
+async function refreshClientMountStatus({ preserveResult = false } = {}) {
+  if (!window.oliviaDesktop || clientMountAction) return null;
+  const generation = clientMountGeneration;
+  const request = ++clientMountStatusRequest;
+  let timer;
+  try {
+    const outcome = await Promise.race([
+      Promise.resolve().then(() => window.oliviaDesktop.getClientStatus())
+        .then(status => ({ status }), error => ({ error })),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 15_000); }),
+    ]);
+    if (generation !== clientMountGeneration || request !== clientMountStatusRequest || clientMountAction) return null;
+    if (outcome.status) { renderClientMountStatus(outcome.status); return outcome.status; }
+    if (!preserveResult) $("#serviceMountResult").textContent = outcome.timedOut
+      ? "状态查询超时，当前客户端状态尚未确认。"
+      : `状态查询失败：${clientMountErrorMessage(outcome.error)}`;
+    return null;
+  } finally { clearTimeout(timer); }
+}
+
+function finishClientMountAction(action, status, error) {
+  if (clientMountAction !== action) return;
+  clientMountAction = null;
+  clientMountGeneration++;
+  stopLoading("#serviceMountResult");
+  const label = action.kind === "enable" ? "启用" : "停用";
+  if (error) {
+    $("#serviceMountResult").textContent = `${label}失败：${clientMountErrorMessage(error)}`;
+    updateClientMountButtons();
+    void refreshClientMountStatus({ preserveResult: true });
+    return;
+  }
+  if (status) renderClientMountStatus(status);
+  else updateClientMountButtons();
+  const expectedMounted = action.kind === "enable";
+  const verified = status?.clientSelected === true && status.clientFound === true && status.webplayerFound === true
+    && status.feappMounted === expectedMounted && status.webplayerMounted === expectedMounted;
+  $("#serviceMountResult").textContent = verified ? `服务已${label}`
+    : `${label}未完成：客户端状态未确认或仍有部分挂载，请检查 FE/WP 状态后重试。`;
+}
+
+async function runClientMountAction(kind) {
+  if (clientMountAction) return;
+  const action = { kind };
+  clientMountAction = action;
+  clientMountGeneration++;
+  updateClientMountButtons();
+  if (kind === "disable") {
+    try {
+      if (!await confirmNotice("确认停用客户端本机信件服务？本机后台仍会继续运行。")) {
+        clientMountAction = null;
+        clientMountGeneration++;
+        updateClientMountButtons();
+        return;
+      }
+    } catch (error) { finishClientMountAction(action, null, error); return; }
+  }
+  startLoading("#serviceMountResult", kind === "enable" ? "正在检查备份并启用客户端……" : "正在检查备份并恢复客户端……");
+  const port = $("#servicePort").value;
+  let timer;
+  const completion = Promise.resolve().then(() => kind === "enable"
+    ? window.oliviaDesktop.mountClient(port) : window.oliviaDesktop.restoreClient())
+    .then(status => finishClientMountAction(action, status, null), error => finishClientMountAction(action, null, error))
+    .finally(() => clearTimeout(timer));
+  await Promise.race([
+    completion,
+    new Promise(resolve => { timer = setTimeout(() => {
+      if (clientMountAction === action) {
+        stopLoading("#serviceMountResult");
+        $("#serviceMountResult").textContent = `${kind === "enable" ? "启用" : "停用"}等待超时，操作结果尚未确认；请勿重复点击，等待原操作返回。`;
+        // Do not release the lock: a UI timeout does not cancel the desktop write.
+        updateClientMountButtons();
+      }
+      resolve();
+    }, 120_000); }),
+  ]);
 }
 
 function resetSecretInput(inputSelector, buttonSelector) {
@@ -201,11 +329,11 @@ function resetSecretInput(inputSelector, buttonSelector) {
 
 function renderDeepSeek(profile) {
   $("#apiKey").value = profile.apiKey ?? "";
-  $("#apiKey").placeholder = "填写 DeepSeek API Key";
+  $("#apiKey").placeholder = "填写远程接口 API Key";
   resetSecretInput("#apiKey", "#toggleApiKey");
   const custom = profile.model !== "deepseek-v4-pro" || profile.baseUrl !== "https://api.deepseek.com";
   $("#customModel").checked = custom;
-  $("#modelName").value = profile.model;
+  replaceModelOptions("#modelName", [profile.model], profile.model);
   $("#modelBaseUrl").value = profile.baseUrl;
   $("#customFields").hidden = !custom;
 }
@@ -213,7 +341,7 @@ function renderDeepSeek(profile) {
 function renderLocalModel(profile) {
   $("#localApiKey").value = profile.apiKey ?? "";
   resetSecretInput("#localApiKey", "#toggleLocalApiKey");
-  $("#localModelName").value = profile.model;
+  replaceModelOptions("#localModelName", [profile.model], profile.model);
   $("#localModelBaseUrl").value = profile.baseUrl;
   $("#localAuthMode").value = profile.authMode;
   $("#localApiKeyField").hidden = profile.authMode !== "bearer";
@@ -225,13 +353,17 @@ function showModelProfile(provider) {
   });
   const active = modelConfiguration?.activeProvider;
   $("#activateModelProvider").disabled = provider === active;
-  $("#activateModelProvider").textContent = provider === active ? "当前已启用" : "设为当前模型";
+  $("#activateModelProvider").textContent = provider === active ? "当前已启用" : "检测并设为当前模型";
 }
 
 function renderModelConfig(config, preserveSelection = false) {
   modelConfiguration = config;
   const selected = preserveSelection ? $("#modelProvider").value : config.activeProvider;
-  $("#activeModelProvider").textContent = config.activeProvider === "local" ? "当前：本地 Gemma" : "当前：DeepSeek";
+  const activeProfile = config.profiles[config.activeProvider];
+  const active = $("#activeModelProvider");
+  active.dataset.baseText = `当前：${providerLabel(config.activeProvider)} · ${activeProfile.model}`;
+  active.textContent = active.dataset.baseText;
+  active.title = active.textContent;
   $("#modelProvider").value = selected;
   renderDeepSeek(config.profiles.deepseek);
   renderLocalModel(config.profiles.local);
@@ -266,6 +398,157 @@ function localProfileFromForm() {
     model: $("#localModelName").value,
     baseUrl: $("#localModelBaseUrl").value,
   };
+}
+
+function renderModelRuntime(status) {
+  const labels = { unconfigured: "未配置", checking: "正在检测", available: "可用", unavailable: "不可用" };
+  const active = $("#activeModelProvider");
+  if (active && status?.state) {
+    const baseText = active.dataset.baseText || active.textContent;
+    active.dataset.baseText = baseText;
+    active.textContent = `${baseText} · ${labels[status.state] ?? status.state}`;
+    active.title = active.textContent;
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (!bytes) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function renderStorageStatus(status) {
+  const labels = {
+    ready: "可用",
+    scanning: "正在扫描",
+    migrating: "正在迁移",
+    insufficient_space: "空间不足",
+    unavailable: "路径不可用，继续保留最后有效路径",
+    partial: "部分作品路径不可用",
+    failed: "处理失败",
+  };
+  $("#storageState").textContent = labels[status.state] ?? status.state;
+  $("#storageConfiguredPath").textContent = status.configuredPath || "尚未读取";
+  $("#storageConfiguredPath").title = status.configuredPath || "";
+  $("#storageActivePath").textContent = status.activePath || "暂无有效路径";
+  $("#storageActivePath").title = status.activePath || "";
+  const roots = Array.isArray(status.referencedRoots) ? status.referencedRoots : [];
+  const referenced = roots.length
+    ? roots.map(root => `${root.path}（${root.works} 个作品，${root.files} 个视频文件${Number.isInteger(root.missing) ? `，${root.missing} 个缺失` : ""}）`).join("\n")
+    : "当前数据库没有外部作品引用";
+  $("#storageReferencedRoots").textContent = referenced;
+  $("#storageReferencedRoots").title = referenced;
+  const summaryParts = [
+    `${Number(status.workCount ?? 0)} 个作品`,
+    `${Number(status.referencedFileCount ?? 0)} 个视频文件`,
+    `${Number(status.referencedRootCount ?? roots.length)} 个来源目录`,
+  ];
+  if (Number.isInteger(status.missingFileCount)) summaryParts.push(`${status.missingFileCount} 个缺失`);
+  $("#storageReferenceSummary").textContent = summaryParts.join(" · ");
+  $("#storageManagedPath").textContent = status.managedPath || "尚未取得游戏保存路径";
+  $("#storageManagedPath").title = status.managedPath || "";
+  if (!storageMigrationPreview) $("#storageSpace").textContent = "尚未预览；不会自动迁移";
+  $("#storageError").textContent = status.error || "";
+}
+
+function stopStorageMigrationPolling() {
+  if (storageMigrationPollTimer) clearTimeout(storageMigrationPollTimer);
+  storageMigrationPollTimer = null;
+}
+
+function renderStorageMigrationJob(job) {
+  const progress = $("#storageMigrationProgress");
+  const running = job.state === "scanning";
+  progress.hidden = false;
+  progress.dataset.state = job.state === "ready" ? "done" : job.state;
+  const total = Math.max(0, Number(job.totalFiles ?? 0));
+  const processed = Math.max(0, Number(job.processedFiles ?? 0));
+  const percent = total > 0 ? Math.min(100, Math.round(processed / total * 100)) : 0;
+  progress.querySelector(".taskProgressTrack span").style.width = `${percent}%`;
+  $("#storageMigrationPercent").textContent = `${percent}%`;
+  $("#storageMigrationStage").textContent = running
+    ? total > 0 ? `正在扫描 ${processed}/${total} 个视频文件` : "正在收集视频文件"
+    : job.state === "ready" ? `预览完成，共 ${job.files} 个视频文件`
+      : job.state === "cancelled" ? "预览已取消"
+        : job.state === "failed" ? "预览失败" : "等待开始预览";
+  $("#previewStorageMigration").disabled = running;
+  $("#cancelStorageMigrationPreview").hidden = !running;
+  $("#confirmStorageMigration").disabled = job.state !== "ready" || !job.sufficient || job.files === 0;
+}
+
+async function pollStorageMigrationPreview() {
+  stopStorageMigrationPolling();
+  const jobId = storageMigrationPreviewJobId;
+  if (!jobId) return;
+  const job = await api(`/admin/api/storage/migration/preview/${encodeURIComponent(jobId)}`);
+  if (jobId !== storageMigrationPreviewJobId) return;
+  renderStorageMigrationJob(job);
+  if (job.state === "scanning") {
+    storageMigrationPollTimer = setTimeout(() => pollStorageMigrationPreview().catch(showError), 1_000);
+    return;
+  }
+  storageMigrationPreviewJobId = null;
+  if (job.state === "ready") {
+    storageMigrationPreview = job;
+    $("#storageSpace").textContent = job.sufficient
+      ? `${job.files} 个视频，需要 ${formatBytes(job.totalBytes)}，可用 ${formatBytes(job.freeBytes)}`
+      : `${job.files} 个视频，空间不足 ${formatBytes(job.shortfallBytes)}`;
+    $("#storageError").textContent = "预览不会复制文件；确认后才开始迁移";
+  } else {
+    storageMigrationPreview = null;
+    $("#storageError").textContent = job.error || (job.state === "cancelled" ? "已取消迁移预览" : "迁移预览失败");
+  }
+}
+
+function replaceModelOptions(targetSelector, models, preferred = "") {
+  const target = $(targetSelector);
+  const values = [...new Set(models.map(value => String(value).trim()).filter(Boolean))];
+  target.replaceChildren();
+  if (!values.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "尚未查询到模型";
+    option.disabled = true;
+    option.selected = true;
+    target.append(option);
+    return;
+  }
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    option.title = value;
+    target.append(option);
+  }
+  target.value = values.includes(preferred) ? preferred : values[0];
+}
+
+async function queryModels(provider) {
+  const profile = provider === "local" ? localProfileFromForm() : deepSeekProfileFromForm();
+  const target = provider === "local" ? "#localModelName" : "#modelName";
+  const resultSelector = provider === "local" ? "#localModelResult" : "#deepSeekResult";
+  const buttonSelector = provider === "local" ? "#queryLocalModels" : "#queryRemoteModels";
+  return runModelOperation({
+    buttonSelector,
+    resultSelector,
+    pendingText: "正在查询模型列表……",
+    successText: result => `已查询到 ${result.models.length} 个模型；请选择后保存并测试`,
+    failureText: "查询失败",
+    operation: async () => {
+      const result = await api("/admin/api/model/models", {
+        method: "POST",
+        body: JSON.stringify(profile),
+      });
+      if (provider === "deepseek" && !$("#customModel").checked) {
+        $("#customModel").checked = true;
+        $("#customFields").hidden = false;
+      }
+      replaceModelOptions(target, result.models, profile.model);
+      return result;
+    },
+  });
 }
 
 function escapeHtml(value) {
@@ -337,20 +620,30 @@ function renderMemoryList() {
         </label>`;
     return `<article class="exchangeCard" data-index="${index}">
       <div class="exchangeHead">
-        <strong>往来 ${String(memoryExchanges.length - index).padStart(2, "0")}</strong>
-        <input type="date" data-field="date" value="${escapeHtml(exchange.date)}" aria-label="往来日期">
-        <input type="time" data-field="time" value="${escapeHtml(exchange.time || "12:00")}" aria-label="往来时间">
-        <div class="exchangeActions">
+        <div class="exchangeTitleActions">
+          <strong>往来 ${String(memoryExchanges.length - index).padStart(2, "0")}</strong>
+          <div class="exchangeActions">
           <button class="secondary compact" type="button" data-action="insert-above">上方插入</button>
           <button class="secondary compact" type="button" data-action="up" ${index === 0 ? "disabled" : ""} title="上移">↑</button>
           <button class="secondary compact" type="button" data-action="down" ${index === memoryExchanges.length - 1 ? "disabled" : ""} title="下移">↓</button>
           <button class="secondary compact danger" type="button" data-action="remove">删除</button>
+          </div>
+        </div>
+        <div class="exchangeDateTime">
+          <input type="date" data-field="date" value="${escapeHtml(exchange.date)}" aria-label="往来日期">
+          <input type="time" data-field="time" value="${escapeHtml(exchange.time || "12:00")}" aria-label="往来时间">
         </div>
       </div>
-      <label>来信</label>
-      <textarea data-field="incoming">${escapeHtml(exchange.incoming)}</textarea>
-      <label>林离回信</label>
-      <textarea data-field="reply">${escapeHtml(exchange.reply)}</textarea>
+      <div class="exchangeBody">
+        <div class="exchangeField">
+          <label>来信</label>
+          <textarea data-field="incoming">${escapeHtml(exchange.incoming)}</textarea>
+        </div>
+        <div class="exchangeField">
+          <label>林离回信</label>
+          <textarea data-field="reply">${escapeHtml(exchange.reply)}</textarea>
+        </div>
+      </div>
       <div class="videoAttachment">
         <div>
           <strong>视频回信</strong>
@@ -388,49 +681,126 @@ async function saveMemory() {
   $("#memoryResult").textContent = memoryExchanges.length ? "已保存，等待整理" : "";
 }
 
+function providerLabel(provider) {
+  return provider === "local" ? "本地兼容 API" : "远程兼容 API";
+}
+
+function openMidiSongEditor(songId) {
+  return window.OliviaSoulSongEditor.open({ baseUrl: "/admin/api", songId, onSaved(metadata) {
+    if (!midiStatusSnapshot) return;
+    window.OliviaSoulSongEditor.applyMetadata(midiStatusSnapshot.songs, metadata);
+    renderMidiStatus(midiStatusSnapshot);
+  } });
+}
+
+function renderMidiStatus(data) {
+  midiStatusSnapshot = data;
+  const dataRoot = data.dataRoot
+    ? `${data.library?.mode === "reference" ? "当前引用目录" : "当前保存目录"}：${data.dataRoot}`
+    : "尚未取得官方作品目录";
+  $("#midiDataRoot").textContent = dataRoot;
+  $("#midiDataRoot").title = dataRoot;
+  const query = $("#midiSongSearch").value.trim().normalize("NFKC").toLocaleLowerCase();
+  const list = $("#midiSongList");
+  const rows = new Map([...list.querySelectorAll("[data-song-id]")].map(row => [row.dataset.songId, row]));
+  const ids = new Set();
+  list.querySelector(".empty")?.remove();
+  for (const song of data.songs) {
+    const id = String(song.id); ids.add(id);
+    let row = rows.get(id);
+    if (!row) {
+      row = document.createElement("article"); row.className = "performanceItem"; row.dataset.songId = id;
+      const title = document.createElement("strong"), info = document.createElement("span"), edit = document.createElement("button");
+      edit.type = "button"; edit.className = "secondary compact songEditButton"; edit.textContent = "名称 / 时段";
+      edit.addEventListener("click", event => { event.stopPropagation(); openMidiSongEditor(id); });
+      row.append(title, info, edit); list.append(row);
+    }
+    row.querySelector("strong").textContent = song.name;
+    row.querySelector("span").textContent = `完整视频导入${song.durationUs ? ` · ${Math.round(song.durationUs / 1_000_000)} 秒` : ""}`;
+    row.hidden = Boolean(query && !String(song.name).normalize("NFKC").toLocaleLowerCase().includes(query));
+  }
+  for (const [id, row] of rows) if (!ids.has(id)) row.remove();
+  if (!data.songs.length) { const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = "还没有本地曲目。"; list.append(empty); }
+}
+
+async function refreshMidiStatus() {
+  renderMidiStatus(await api("/admin/api/midi"));
+}
+
+function renderMidiLibraryPreview(preview) {
+  $("#midiLibraryPreview").classList.remove("empty");
+  $("#midiLibraryPreview").innerHTML = preview.entries.length
+    ? preview.entries.map(entry => `
+      <article>
+        <strong>${escapeHtml(entry.name)}</strong>
+        <span>${entry.hasVideo ? `视频 ${entry.variantCount} 个版本` : "缺少官方生成的视频（跳过）"}</span>
+      </article>`).join("")
+    : '<p class="empty">没有找到可导入的 MIDI 或 MP4。</p>';
+}
+
 async function refresh() {
-  const [status, identity, modelConfig, memoryStatus] = await Promise.all([
+  const [status, identity, modelConfig, memoryStatus, storageStatus, modelStatus] = await Promise.all([
     api("/admin/api/status"),
     api("/admin/api/identity"),
     api("/admin/api/model"),
     api("/admin/api/memory/status"),
+    api("/admin/api/storage"),
+    api("/admin/api/model/status"),
   ]);
   renderStatus(status);
   renderIdentity(identity);
   renderModelConfig(modelConfig);
   renderMemoryStatus(memoryStatus);
-  if (window.oliviaDesktop) renderClientMountStatus(await window.oliviaDesktop.getClientStatus());
+  renderStorageStatus(storageStatus);
+  renderModelRuntime(modelStatus);
+  if (window.oliviaDesktop) await refreshClientMountStatus();
 }
 
 async function refreshStatus() {
-  const [status, memoryStatus] = await Promise.all([
+  const [status, memoryStatus, storageStatus] = await Promise.all([
     api("/admin/api/status"),
     api("/admin/api/memory/status"),
+    api("/admin/api/storage"),
   ]);
   renderStatus(status);
   renderMemoryStatus(memoryStatus);
+  renderStorageStatus(storageStatus);
+  if (!document.querySelector('[data-page="performances"]').hidden) await refreshMidiStatus();
 }
 
 async function loadDesktopSettings() {
   if (!window.oliviaDesktop) return;
   $("#desktopSettings").hidden = false;
   $("#serviceMountSettings").hidden = false;
-  const [settings, clientStatus] = await Promise.all([
+  const [settings] = await Promise.all([
     window.oliviaDesktop.getSettings(),
-    window.oliviaDesktop.getClientStatus(),
+    refreshClientMountStatus(),
   ]);
   $("#autoStart").checked = settings.autoStart;
   $("#servicePort").value = settings.port;
-  renderClientMountStatus(clientStatus);
+}
+
+function renderUpdateInformation(data) {
+  updateInformation = data;
+  $("#updateVersion").textContent = `当前 ${data.currentTag} · GitHub 最新 ${data.latestTag}`;
+  $("#downloadUpdate").hidden = !data.updateAvailable;
+  $("#updateResult").textContent = data.updateAvailable ? "发现新版本，可以下载" : "当前已经是最新版本";
+}
+
+async function loadUpdate() {
+  startLoading("#updateResult", "正在查询 GitHub Release……");
+  try {
+    renderUpdateInformation(await api("/admin/api/update"));
+  } finally {
+    stopLoading("#updateResult");
+  }
 }
 
 function renderDebug(data) {
   $("#debugDelay").value = data.delaySeconds;
   $("#debugDelayLabel").textContent = `回信最小延迟（${data.delaySeconds}秒）`;
   $("#debugDailyLetterLimit").value = data.dailyLetterLimit;
-  $("#debugQuotaStatus").textContent = data.dailyLetterLimit === 0
-    ? "当前不限次数"
-    : `今天还可发送 ${data.remainingToday} 封（上限 ${data.dailyLetterLimit}）`;
+  $("#debugQuotaStatus").textContent = `今天还可发送 ${Number(data.remainingToday) || 0} 封（上限 ${data.dailyLetterLimit}）`;
   const show = $("#showSummaries").checked;
   $("#debugSummaries").hidden = !show;
   if (!show) return;
@@ -462,7 +832,11 @@ document.querySelectorAll(".sideTab").forEach(button => {
   button.addEventListener("click", safely(async () => {
     document.querySelectorAll(".sideTab").forEach(tab => tab.classList.toggle("active", tab === button));
     document.querySelectorAll(".tabPage").forEach(page => page.hidden = page.dataset.page !== button.dataset.tab);
+    const content = document.querySelector(".content");
+    if (content) content.scrollTop = 0;
     if (button.dataset.tab === "memory" && !memoryLoaded) await loadMemory();
+    if (button.dataset.tab === "performances") await refreshMidiStatus();
+    if (button.dataset.tab === "update" && !updateInformation) await loadUpdate();
     if (button.dataset.tab === "debug") await loadDebug();
   }));
 });
@@ -484,6 +858,116 @@ $("#selectTranscriptionMedia").addEventListener("click", safely(async () => {
   $("#transcriptionFileName").textContent = selected.name;
   $("#startTranscription").disabled = false;
 }));
+$("#selectMidiLibrary").addEventListener("click", safely(async () => {
+  if (!window.oliviaDesktop?.selectLibraryFolder) {
+    $("#midiLibraryRoot").focus();
+    return;
+  }
+  const selected = await window.oliviaDesktop.selectLibraryFolder($("#midiLibraryRoot").value.trim());
+  if (!selected.cancelled) $("#midiLibraryRoot").value = selected.path;
+}));
+$("#openMidiLibraryFolder").addEventListener("click", safely(async () => {
+  const path = $("#midiLibraryRoot").value.trim();
+  if (!path) throw new Error("请先选择曲库文件夹");
+  if (!window.oliviaDesktop?.openDirectory) throw new Error("当前运行方式不支持打开目录");
+  const result = await window.oliviaDesktop.openDirectory(path);
+  if (result?.error) throw new Error(result.error);
+}));
+$("#previewMidiLibrary").addEventListener("click", safely(async () => {
+  const root = $("#midiLibraryRoot").value.trim();
+  if (!root) throw new Error("请先选择曲库文件夹");
+  $("#previewMidiLibrary").disabled = true;
+  startLoading("#midiLibraryResult", "正在扫描曲库……");
+  try {
+    const preview = await api("/admin/api/midi-library/preview", {
+      method: "POST",
+      body: JSON.stringify({ root }),
+    });
+    midiLibraryPreviewId = preview.previewId;
+    renderMidiLibraryPreview(preview);
+    $("#confirmMidiLibrary").disabled = preview.total === 0;
+    $("#midiLibraryResult").textContent = `找到 ${preview.total} 首曲目`;
+  } finally {
+    $("#previewMidiLibrary").disabled = false;
+    stopLoading("#midiLibraryResult");
+  }
+}));
+$("#confirmMidiLibrary").addEventListener("click", safely(async () => {
+  if (!midiLibraryPreviewId) throw new Error("请先扫描曲库");
+  $("#confirmMidiLibrary").disabled = true;
+  startLoading("#midiLibraryResult", "正在导入曲库……");
+  try {
+    const result = await api("/admin/api/midi-library/confirm", {
+      method: "POST",
+      body: JSON.stringify({ previewId: midiLibraryPreviewId }),
+    });
+    midiLibraryPreviewId = null;
+    $("#midiLibraryResult").textContent = `导入 ${result.imported} 首，跳过重复 ${result.skipped} 首`;
+    await refreshMidiStatus();
+  } finally {
+    stopLoading("#midiLibraryResult");
+  }
+}));
+$("#refreshMidiStatus").addEventListener("click", safely(refreshMidiStatus));
+$("#refreshStorage").addEventListener("click", safely(async () => {
+  storageMigrationPreview = null;
+  $("#confirmStorageMigration").disabled = true;
+  renderStorageStatus(await api("/admin/api/storage/refresh", { method: "POST", body: "{}" }));
+}));
+$("#previewStorageMigration").addEventListener("click", safely(async () => {
+  storageMigrationPreview = null;
+  $("#confirmStorageMigration").disabled = true;
+  $("#storageError").textContent = "正在只读扫描，不会复制文件";
+  const started = await api("/admin/api/storage/migration/preview", { method: "POST", body: "{}" });
+  storageMigrationPreviewJobId = started.jobId;
+  renderStorageMigrationJob(started);
+  pollStorageMigrationPreview().catch(showError);
+}));
+$("#cancelStorageMigrationPreview").addEventListener("click", safely(async () => {
+  if (!storageMigrationPreviewJobId) return;
+  const jobId = storageMigrationPreviewJobId;
+  const cancelled = await api(
+    `/admin/api/storage/migration/preview/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST", body: "{}" },
+  );
+  if (jobId !== storageMigrationPreviewJobId) return;
+  stopStorageMigrationPolling();
+  storageMigrationPreviewJobId = null;
+  storageMigrationPreview = null;
+  renderStorageMigrationJob(cancelled);
+  $("#storageError").textContent = "已取消迁移预览；没有复制或修改任何文件";
+}));
+$("#confirmStorageMigration").addEventListener("click", safely(async () => {
+  if (!storageMigrationPreview) throw new Error("请先预览迁移内容");
+  const accepted = await confirmNotice(
+    `确认复制 ${storageMigrationPreview.files} 个视频到统一目录？来源文件会继续保留，迁移完成前数据库不会切换。`,
+  );
+  if (!accepted) return;
+  $("#confirmStorageMigration").disabled = true;
+  startLoading("#storageError", "正在复制并校验视频……");
+  try {
+    const result = await api("/admin/api/storage/migration/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token: storageMigrationPreview.token, confirmed: true }),
+    });
+    storageMigrationPreview = null;
+    $("#storageSpace").textContent = `已迁移 ${result.migrated} 首，跳过 ${result.skipped} 个已有文件`;
+    renderStorageStatus(await api("/admin/api/storage"));
+  } finally {
+    stopLoading("#storageError");
+  }
+}));
+$("#midiSongSearch").addEventListener("input", () => {
+  if (midiStatusSnapshot) renderMidiStatus(midiStatusSnapshot);
+});
+function isEditableTextTarget(target) {
+  return target instanceof Element && Boolean(target.closest("input, textarea, [contenteditable='true'], [contenteditable='plaintext-only']"));
+}
+
+document.addEventListener("contextmenu", event => {
+  if (!isEditableTextTarget(event.target)) event.preventDefault();
+});
+window.addEventListener("beforeunload", stopStorageMigrationPolling);
 $("#transcriptionMediaFile").addEventListener("change", event => {
   const file = event.target.files[0];
   if (!file) return;
@@ -578,14 +1062,25 @@ $("#toggleLocalApiKey").addEventListener("click", event => {
   toggleSecret("#localApiKey", event.currentTarget);
 });
 $("#modelProvider").addEventListener("change", event => showModelProfile(event.target.value));
-$("#localAuthMode").addEventListener("change", safely(async event => {
+$("#resetModelConfig").addEventListener("click", safely(async event => {
+  const button = event.currentTarget;
+  if (!await confirmNotice("确认清除当前保存的模型、接口与 API Key？信件、数据库、曲库和媒体不会被删除。")) return;
+  button.disabled = true;
+  $("#resetModelResult").textContent = "正在清除……";
+  try {
+    renderModelConfig(await api("/admin/api/models/reset", { method: "POST", body: "{}" }));
+    renderModelRuntime(await api("/admin/api/model/status"));
+    $("#resetModelResult").textContent = "模型配置已清除";
+  } finally {
+    button.disabled = false;
+  }
+}));
+$("#localAuthMode").addEventListener("change", event => {
   $("#localApiKeyField").hidden = event.target.value !== "bearer";
-  await saveLocalModelConfig();
-}));
-$("#customModel").addEventListener("change", safely(async event => {
+});
+$("#customModel").addEventListener("change", event => {
   $("#customFields").hidden = !event.target.checked;
-  await saveDeepSeekConfig();
-}));
+});
 $("#autoStart").addEventListener("change", safely(async event => {
   const requested = event.target.checked;
   try {
@@ -593,6 +1088,24 @@ $("#autoStart").addEventListener("change", safely(async event => {
   } catch (error) {
     event.target.checked = !requested;
     throw error;
+  }
+}));
+$("#checkUpdate").addEventListener("click", safely(async () => {
+  await loadUpdate();
+}));
+$("#downloadUpdate").addEventListener("click", safely(async () => {
+  if (!updateInformation?.updateAvailable) return;
+  if (!await confirmNotice(`确认下载 ${updateInformation.latestTag}？安装包会保存到本地数据目录。`)) return;
+  $("#downloadUpdate").disabled = true;
+  startLoading("#updateResult", "正在下载并校验安装包，请不要关闭程序……");
+  try {
+    const downloaded = await api("/admin/api/update/download", { method: "POST", body: "{}" });
+    $("#updateResult").textContent = `下载完成：${downloaded.path}`;
+    if (window.oliviaDesktop?.installUpdate && await confirmNotice("安装包已通过 SHA-256 校验。现在启动安装程序并关闭 Olivia Soul？"))
+      await window.oliviaDesktop.installUpdate(downloaded.path);
+  } finally {
+    $("#downloadUpdate").disabled = false;
+    stopLoading("#updateResult");
   }
 }));
 $("#showSummaries").addEventListener("change", safely(async event => {
@@ -628,42 +1141,19 @@ $("#saveDailyLetterLimit").addEventListener("click", safely(async () => {
     body: JSON.stringify({ limit: Number($("#debugDailyLetterLimit").value) }),
   });
   renderDebug({ ...(await api("/admin/api/debug")), ...result });
-  $("#debugQuotaResult").textContent = result.dailyLetterLimit === 0 ? "已设为不限次数" : "上限已保存";
+  $("#debugQuotaResult").textContent = result.dailyLetterLimit === 0 ? "已设为当天不能写信" : "上限已保存";
 }));
 $("#selectClient").addEventListener("click", safely(async () => {
+  if (clientMountAction) return;
+  const generation = clientMountGeneration;
   const status = await window.oliviaDesktop.selectClient();
+  if (clientMountAction || generation !== clientMountGeneration) return;
+  clientMountGeneration++;
   renderClientMountStatus(status);
   if (status.selectionChanged) $("#serviceMountResult").textContent = "已选择客户端";
 }));
-$("#mountService").addEventListener("click", safely(async () => {
-  $("#mountService").disabled = true;
-  $("#restoreClient").disabled = true;
-  startLoading("#serviceMountResult", "正在启用本机服务……");
-  try {
-    const status = await window.oliviaDesktop.mountClient($("#servicePort").value);
-    renderClientMountStatus(status);
-    $("#serviceMountResult").textContent = "";
-  } finally {
-    $("#mountService").disabled = false;
-    stopLoading("#serviceMountResult");
-    window.oliviaDesktop.getClientStatus().then(renderClientMountStatus).catch(console.error);
-  }
-}));
-$("#restoreClient").addEventListener("click", safely(async () => {
-  if (!await confirmNotice("确认停用客户端本机信件服务？本机后台仍会继续运行。")) return;
-  $("#mountService").disabled = true;
-  $("#restoreClient").disabled = true;
-  startLoading("#serviceMountResult", "正在停用服务……");
-  try {
-    const status = await window.oliviaDesktop.restoreClient();
-    renderClientMountStatus(status);
-    $("#serviceMountResult").textContent = "服务已停用";
-  } finally {
-    $("#mountService").disabled = false;
-    stopLoading("#serviceMountResult");
-    window.oliviaDesktop.getClientStatus().then(renderClientMountStatus).catch(console.error);
-  }
-}));
+$("#mountService").addEventListener("click", safely(() => runClientMountAction("enable")));
+$("#restoreClient").addEventListener("click", safely(() => runClientMountAction("disable")));
 const saveIdentity = safely(async () => {
   const identity = await api("/admin/api/identity", {
     method: "POST",
@@ -677,56 +1167,58 @@ const saveIdentity = safely(async () => {
 });
 $("#offlineUid").addEventListener("change", saveIdentity);
 $("#offlineNickname").addEventListener("change", saveIdentity);
-async function saveDeepSeekConfig() {
-  const result = await api("/admin/api/model/profile", {
-    method: "POST",
-    body: JSON.stringify(deepSeekProfileFromForm()),
-  });
-  renderModelConfig(result, true);
-  $("#deepSeekResult").textContent = "已自动保存";
-}
-async function saveLocalModelConfig() {
-  const result = await api("/admin/api/model/profile", {
-    method: "POST",
-    body: JSON.stringify(localProfileFromForm()),
-  });
-  renderModelConfig(result, true);
-  $("#localModelResult").textContent = "已自动保存";
-}
-const saveDeepSeek = safely(saveDeepSeekConfig);
-$("#apiKey").addEventListener("change", saveDeepSeek);
-$("#modelName").addEventListener("change", saveDeepSeek);
-$("#modelBaseUrl").addEventListener("change", saveDeepSeek);
-$("#testDeepSeek").addEventListener("click", safely(async () => {
-  $("#deepSeekResult").textContent = "正在测试……";
-  await saveDeepSeekConfig();
-  await api("/admin/api/model/test", {
-    method: "POST",
-    body: JSON.stringify({ provider: "deepseek" }),
-  });
-  $("#deepSeekResult").textContent = "连接成功";
+$("#queryRemoteModels").addEventListener("click", safely(() => queryModels("deepseek")));
+$("#testDeepSeek").addEventListener("click", safely(() => runModelOperation({
+  buttonSelector: "#testDeepSeek",
+  resultSelector: "#deepSeekResult",
+  pendingText: "正在测试……",
+  successText: "连接成功，配置已保存",
+  failureText: "测试失败",
+  operation: async () => {
+    const result = await api("/admin/api/model/test-save", {
+      method: "POST",
+      body: JSON.stringify(deepSeekProfileFromForm()),
+    });
+    renderModelConfig(result.config, true);
+    return result;
+  },
+})));
+$("#queryLocalModels").addEventListener("click", safely(() => queryModels("local")));
+$("#testLocalModel").addEventListener("click", safely(() => runModelOperation({
+  buttonSelector: "#testLocalModel",
+  resultSelector: "#localModelResult",
+  pendingText: "正在测试……",
+  successText: "连接成功，配置已保存",
+  failureText: "测试失败",
+  operation: async () => {
+    const result = await api("/admin/api/model/test-save", {
+      method: "POST",
+      body: JSON.stringify(localProfileFromForm()),
+    });
+    renderModelConfig(result.config, true);
+    return result;
+  },
+})));
+$("#detectActiveModel").addEventListener("click", safely(async () => {
+  renderModelRuntime(await api("/admin/api/model/detect", { method: "POST", body: "{}" }));
 }));
-const saveLocalModel = safely(saveLocalModelConfig);
-$("#localApiKey").addEventListener("change", saveLocalModel);
-$("#localModelName").addEventListener("change", saveLocalModel);
-$("#localModelBaseUrl").addEventListener("change", saveLocalModel);
-$("#testLocalModel").addEventListener("click", safely(async () => {
-  $("#localModelResult").textContent = "正在测试……";
-  await saveLocalModelConfig();
-  await api("/admin/api/model/test", {
-    method: "POST",
-    body: JSON.stringify({ provider: "local" }),
-  });
-  $("#localModelResult").textContent = "连接成功";
-}));
-$("#activateModelProvider").addEventListener("click", safely(async () => {
+$("#activateModelProvider").addEventListener("click", safely(() => {
   const provider = $("#modelProvider").value;
-  const result = await api("/admin/api/model/activate", {
-    method: "POST",
-    body: JSON.stringify({ provider }),
+  return runModelOperation({
+    buttonSelector: "#activateModelProvider",
+    resultSelector: provider === "local" ? "#localModelResult" : "#deepSeekResult",
+    pendingText: "正在检测已保存的模型……",
+    successText: "检测成功，已设为当前模型",
+    failureText: "启用失败",
+    operation: async () => {
+      const result = await api("/admin/api/model/activate", {
+        method: "POST",
+        body: JSON.stringify({ provider }),
+      });
+      renderModelConfig(result, true);
+      return result;
+    },
   });
-  renderModelConfig(result, true);
-  $(provider === "local" ? "#localModelResult" : "#deepSeekResult").textContent = "已设为当前模型";
 }));
 $("#importContent").addEventListener("input", resetImportPreview);
 $("#aiImport").addEventListener("click", safely(async () => {

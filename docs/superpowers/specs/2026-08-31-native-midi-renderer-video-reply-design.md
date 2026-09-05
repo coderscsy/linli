@@ -64,7 +64,7 @@
 
 ### 阶段 1：原生渲染器可行性验证
 
-阶段 1 不修改游戏业务逻辑，所有探测工具放在 `I:\Tools\OliviaSoul-reference-2b56a78e`，资产、缓存和实验输出放在 `I:\OliviaSoulData\MidiRenderer`。
+阶段 1 不修改游戏业务逻辑，所有探测工具放在 `<源码目录>`，资产、缓存和实验输出放在 `<用户指定的探测数据目录>`。
 
 工作范围：
 
@@ -120,7 +120,7 @@ OliviaSoul 本地实现并接管：
 
 ## 数据与存储
 
-默认根目录：`I:\OliviaSoulData\MidiRenderer`。
+默认根目录：`<用户指定的探测数据目录>`。
 
 - `inputs/`：用户原始 MIDI，文件名去路径化并使用任务 ID 隔离。
 - `jobs/`：任务元数据、解析摘要、警告和状态日志。
@@ -132,7 +132,7 @@ OliviaSoul 本地实现并接管：
 
 OliviaSoul SQLite 增加 `midi_jobs` 表保存任务 ID、输入路径、原文件名、状态、进度、警告、错误、输出路径、创建/完成时间及可选的目标信件 ID。数据库只保存相对路径，服务端对所有文件请求做根目录约束，禁止 `..` 和任意绝对路径访问。
 
-当前位于 `C:\Users\sycan\AppData\Roaming\miHoYo\Olivia-steam\cache\studio` 的约 20.7 GB 官方缓存不在本设计中移动或删除。新增流程不得把视频帧、模型、渲染器或输出写到该目录。
+当前位于 `C:\Users\YOUR_NAME\AppData\Roaming\miHoYo\Olivia-steam\cache\studio` 的约 20.7 GB 官方缓存不在本设计中移动或删除。新增流程不得把视频帧、模型、渲染器或输出写到该目录。
 
 ## 视频回信接入
 
@@ -189,7 +189,7 @@ API/界面：
 - 客户端 `feapp.dat` 每次补丁前保存原始哈希和带时间戳备份，补丁包验证可解压、路由数量和标记唯一性。
 - 运行版同步前备份 OliviaSoul 数据库、服务文件和客户端资源；所有备份存放 I 盘。
 - 提供一键卸载挂载和恢复原 `feapp.dat` 的路径。
-- 不改动 `I:\Backups\BSide-Olivia-Lin-2026-08-31`；该目录继续作为停服时点的只读基线。
+- 不改动 `<用户备份目录>`；该目录继续作为停服时点的只读基线。
 
 ## 实施决策门
 

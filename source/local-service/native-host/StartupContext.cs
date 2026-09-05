@@ -19,6 +19,7 @@ namespace OliviaSoul
         private void Start(object sender, EventArgs args)
         {
             Application.Idle -= Start;
+            if (_mainForm.IsQuitting || _mainForm.IsDisposed) return;
             if (!_showSplash)
             {
                 MainForm = _mainForm;
@@ -34,6 +35,7 @@ namespace OliviaSoul
             };
             _splash.BeginAnimation(delegate
             {
+                if (_mainForm.IsQuitting || _mainForm.IsDisposed) return;
                 MainForm = _mainForm;
                 _mainForm.Show();
             });

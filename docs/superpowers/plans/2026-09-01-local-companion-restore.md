@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Treat `Z:\SteamLibrary\steamapps\common\BSide Olivia Lin Test`, Steam manifests, and `I:\Backups\BSide-Olivia-Lin-2026-08-31` as read-only inputs.
+- Treat `<游戏安装目录>`, Steam manifests, and `<用户备份目录>` as read-only inputs.
 - Write the independent runtime only under `I:\OliviaSoulLocal\BSide`; do not place new media, databases, build caches, or models on C.
 - I is exFAT and reports `Warning / Full Repair Needed`: do not use hard links, do not assume transactional rename, and stop on any new read/write/hash error.
 - Do not delete or move the existing C-drive cache in this plan.
@@ -80,7 +80,7 @@ The script must resolve literal absolute paths, reject overlap, require the exac
 
 - [x] **Step 5: Run the installer against the real inputs in manifest-only mode**
 
-Run with `-WhatIfManifestOnly` against the Z client, clean front end `C:\Users\sycan\AppData\Roaming\OliviaSoul\client-backups\daa132980f27b2fa84165d5f74f582eb.feapp.dat`, and the I backup catalog. Expect no writes outside a temporary I-drive test directory and record the two known front-end hashes in the test fixture.
+Run with `-WhatIfManifestOnly` against the Z client, clean front end `C:\Users\YOUR_NAME\AppData\Roaming\OliviaSoul\client-backups\daa132980f27b2fa84165d5f74f582eb.feapp.dat`, and the I backup catalog. Expect no writes outside a temporary I-drive test directory and record the two known front-end hashes in the test fixture.
 
 - [x] **Step 6: Commit**
 

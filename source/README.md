@@ -1,6 +1,6 @@
 # 工程源码
 
-本目录保留生成 2008.2.7 正式发布包所需的源码快照。
+本目录保留生成 R10（Release：2008.2.7-linli.2，程序版本：2008.2.7）所需的源码快照。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
 
 ```text
 source/
@@ -26,7 +26,7 @@ npm run build:win
 
 ## 原生渲染器可行性探测
 
-原生渲染器的 Stage 1A 只读探测说明见 [renderer-probe/README.md](renderer-probe/README.md)。它与 `local-service` 分离，仅建立资产证据、哈希和后续决策；目前尚不能生成 MIDI 视频。
+`renderer-probe` 与 `midi-renderer` 属于历史实验代码，不是 R10 的用户功能，也不随当前安装包提供琴键视频运行时。MIDI 视频生成与自动人物演奏已退出开发范围；当前只导入已生成完成的有效演奏 MP4。
 
 源码快照不包含：
 

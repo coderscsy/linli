@@ -2,6 +2,7 @@ using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -48,11 +49,14 @@ namespace OliviaSoul
     setAutoStart: enabled => invoke('setAutoStart', [enabled]),
     selectClient: () => invoke('selectClient', []),
     selectMediaFile: () => invoke('selectMediaFile', []),
+    selectLibraryFolder: initialPath => invoke('selectLibraryFolder', [initialPath]),
+    openDirectory: path => invoke('openDirectory', [path]),
     getClientStatus: () => invoke('getClientStatus', []),
     mountClient: port => invoke('mountClient', [port]),
     restoreClient: () => invoke('restoreClient', []),
     exportSoul: () => invoke('exportSoul', []),
     exportRemoteSoul: jobId => invoke('exportRemoteSoul', [jobId]),
+    installUpdate: path => invoke('installUpdate', [path]),
     hideToTray: () => invoke('hideToTray', [])
   };
 })();");
@@ -81,11 +85,20 @@ namespace OliviaSoul
                     case "selectMediaFile":
                         result = SelectMediaFile();
                         break;
+                    case "selectLibraryFolder":
+                        result = SelectLibraryFolder(values != null && values.Count > 0 ? Convert.ToString(values[0]) : "");
+                        break;
+                    case "openDirectory":
+                        result = OpenDirectory(values != null && values.Count > 0 ? Convert.ToString(values[0]) : "");
+                        break;
                     case "exportSoul":
                         result = await ExportSoulAsync();
                         break;
                     case "exportRemoteSoul":
                         result = await ExportRemoteSoulAsync(values != null && values.Count > 0 ? Convert.ToString(values[0]) : "");
+                        break;
+                    case "installUpdate":
+                        result = await InstallUpdateAsync(values != null && values.Count > 0 ? Convert.ToString(values[0]) : "");
                         break;
                     case "getSettings":
                     case "getClientStatus":
@@ -142,6 +155,51 @@ namespace OliviaSoul
             }
         }
 
+        private string NearestExistingDirectory(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value)) return "";
+            string candidate;
+            try { candidate = Path.GetFullPath(value.Trim()); }
+            catch { return ""; }
+            while (!String.IsNullOrWhiteSpace(candidate))
+            {
+                if (Directory.Exists(candidate)) return candidate;
+                var parent = Directory.GetParent(candidate);
+                if (parent == null) return "";
+                candidate = parent.FullName;
+            }
+            return "";
+        }
+
+        private object SelectLibraryFolder(string initialPath)
+        {
+            initialPath = NearestExistingDirectory(initialPath);
+            using (var picker = new FolderBrowserDialog
+            {
+                Description = "选择要导入到“我的上传”的 MIDI / MP4 曲库文件夹",
+                SelectedPath = initialPath,
+                ShowNewFolderButton = false,
+            })
+            {
+                if (picker.ShowDialog(_form) != DialogResult.OK)
+                    return new Dictionary<string, object> { { "cancelled", true } };
+                return new Dictionary<string, object> {
+                    { "cancelled", false },
+                    { "path", picker.SelectedPath },
+                };
+            }
+        }
+
+        private object OpenDirectory(string value)
+        {
+            string fullPath;
+            try { fullPath = Path.GetFullPath((value ?? "").Trim()); }
+            catch { throw new InvalidOperationException("目录路径无效"); }
+            if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("目录不存在或当前无法访问");
+            Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true });
+            return new Dictionary<string, object> { { "opened", true }, { "path", fullPath } };
+        }
+
         private object SelectMediaFile()
         {
             using (var picker = new OpenFileDialog
@@ -179,6 +237,20 @@ namespace OliviaSoul
                     return new Dictionary<string, object> { { "cancelled", true } };
                 return await _backend.SendAsync("exportRemoteSoul", jobId, picker.FileName);
             }
+        }
+
+        private async Task<object> InstallUpdateAsync(string path)
+        {
+            var prepared = await _backend.SendAsync("prepareUpdateInstall", path) as IDictionary<string, object>;
+            if (prepared == null || !prepared.ContainsKey("path"))
+                throw new InvalidOperationException("更新安装路径校验失败");
+            var installer = Convert.ToString(prepared["path"]);
+            Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true });
+            var quitTask = Task.Delay(600).ContinueWith(delegate
+            {
+                if (!_form.IsDisposed) _form.BeginInvoke((Action)(() => _form.RequestQuit()));
+            });
+            return new Dictionary<string, object> { { "started", true }, { "path", installer } };
         }
 
         private void Respond(string id, bool ok, object data, string error)

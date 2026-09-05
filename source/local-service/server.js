@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir, open, rename, rm, stat } from "node:fs/promises";
+import { copyFile, readFile, writeFile, mkdir, open, rename, rm, stat, statfs } from "node:fs/promises";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { Transform } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -17,11 +17,26 @@ import {
   prepareSoulBundle,
 } from "./soul-bundle.js";
 import { TranscriptionEngine, TranscriptionJobs } from "./transcription.js";
+import { MidiStore } from "./midi/store.js";
+import { createMidiRoutes, formatSong } from "./midi/routes.js";
+import { describeSongMetadata, selectSongVariant, songVariants } from "./midi/song-metadata.js";
+import { createSongPreviewResolver } from "./midi/song-preview-source.js";
+import { createSongNameCorrections } from "./midi/song-name-corrections.js";
+import { playbackTimeOfDay } from "./midi/playback-clock.js";
+import { importPerformanceLibrary, scanPerformanceLibrary } from "./midi/library-importer.js";
+import { watchPerformanceLibrary } from "./midi/library-watch.js";
+import { createVideoDurationProbe } from "./midi/media-probe.js";
+import { DurationRepair } from "./midi/duration-repair.js";
+import { checkMigrationCapacity, resolveSongStoragePath, storageDirectories } from "./storage-paths.js";
+import { createStorageMigrationManager } from "./storage-migration.js";
+import { mergeLegacyDatabases, restoreLegacyModelConfig } from "./data-migration.js";
 import {
   activeModelProfile,
   buildChatRequest,
+  buildModelListRequest,
   DEFAULT_DEEPSEEK_PROFILE,
   readModelConfig,
+  resetModelConfig,
   setActiveProvider,
   writeModelProfile,
 } from "./model-config.js";
@@ -37,7 +52,12 @@ const JSON_HEADERS = {
 const REPLY_DELAY_SECONDS = 300;
 const REPLY_DELAY_SETTING = "reply_delay_seconds_v2";
 const DAILY_LETTER_LIMIT_SETTING = "daily_letter_limit";
-const DEFAULT_DAILY_LETTER_LIMIT = 0;
+const LETTER_REVISION_SETTING = "letter_revision";
+const STORAGE_REVISION_SETTING = "storage_revision";
+const LAST_SONG_STORAGE_PATH_SETTING = "last_song_storage_path";
+const DEFAULT_DAILY_LETTER_LIMIT = 3;
+const MIDI_LIBRARY_ROOT_SETTING = "midi_library_root";
+const MIDI_LIBRARY_MODE_SETTING = "midi_library_mode";
 const MAX_DAILY_LETTER_LIMIT = 999;
 const GENERATION_TIMEOUT_MS = 60 * 60 * 1000;
 const MEMORY_EXPORT_SCHEMA = "olivia-soul.memory";
@@ -46,6 +66,9 @@ const LETTER_SUMMARY_PROMPT_VERSION = "v2-source-attribution";
 const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+const DEFAULT_UPDATE_REPOSITORY = "coderscsy/linli";
+const DEFAULT_UPDATE_TAG = "2008.2.7-linli.2";
+const MAX_UPDATE_BYTES = 1024 * 1024 * 1024;
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions?/i,
   /system\s*prompt/i,
@@ -78,6 +101,65 @@ function safeModelError(error) {
   if (error?.name === "AbortError") return "请求超时";
   const message = String(error?.message ?? error ?? "未知错误");
   return message.replace(/Bearer\s+\S+/giu, "Bearer [REDACTED]").slice(0, 500);
+}
+
+function modelIdsFromPayload(payload) {
+  const candidates = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.models)
+        ? payload.models
+        : [];
+  return [...new Set(candidates.map(item => {
+    if (typeof item === "string") return item.trim();
+    return String(item?.id ?? item?.name ?? item?.model ?? "").trim();
+  }).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+function textFromModelContent(value) {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value)) return "";
+  return value
+    .map(part => typeof part === "string" ? part : String(part?.text ?? part?.content ?? ""))
+    .map(part => part.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function modelTextFromPayload(payload) {
+  const choice = payload?.choices?.[0];
+  const message = choice?.message;
+  const outputContent = Array.isArray(payload?.output)
+    ? payload.output.flatMap(item => Array.isArray(item?.content) ? item.content : [])
+    : [];
+  const candidates = [
+    message?.content,
+    message?.reasoning_content,
+    choice?.text,
+    payload?.output_text,
+    outputContent,
+  ];
+  for (const candidate of candidates) {
+    const text = textFromModelContent(candidate);
+    if (text) return text;
+  }
+  return "";
+}
+
+function releaseVersion(tag) {
+  const match = /^(\d+)\.(\d+)\.(\d+)-linli\.(\d+)$/u.exec(String(tag ?? "").trim());
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function isNewerRelease(currentTag, latestTag) {
+  const current = releaseVersion(currentTag);
+  const latest = releaseVersion(latestTag);
+  if (!current || !latest) return String(currentTag) !== String(latestTag);
+  for (let index = 0; index < current.length; index += 1) {
+    if (latest[index] !== current[index]) return latest[index] > current[index];
+  }
+  return false;
 }
 
 function nowSeconds() {
@@ -281,7 +363,7 @@ function formatArchive(person, memory, exchanges) {
       content += `\n## ${exchange.date || "未注明日期"}\n`;
       lastDate = exchange.date;
     }
-    content += `\n### 往来 ${String(index + 1).padStart(2, "0")} · ${exchange.time || "12:00"}\n\n#### 我（信件）\n\n${exchange.incoming}\n\n#### 林离（${exchange.replyLabel}）\n\n${exchange.reply}\n\n---\n`;
+    content += `\n### 往来 ${String(index + 1).padStart(2, "0")} · ${exchange.time || "12:00"}\n\n> 状态：${exchange.stateLabel ?? "已回信"}${exchange.readLabel ? ` · ${exchange.readLabel}` : ""}\n\n#### 我（信件）\n\n${exchange.incoming}\n\n#### 林离（${exchange.replyLabel}）\n\n${exchange.reply}\n\n---\n`;
   });
   return content;
 }
@@ -417,6 +499,10 @@ function initDatabase(path) {
     ON CONFLICT(key) DO NOTHING
   `).run(DAILY_LETTER_LIMIT_SETTING, DEFAULT_DAILY_LETTER_LIMIT);
   db.prepare(`
+    INSERT INTO settings(key, value) VALUES(?, '0')
+    ON CONFLICT(key) DO NOTHING
+  `).run(LETTER_REVISION_SETTING);
+  db.prepare(`
     INSERT INTO settings(key, value) VALUES('offline_uid', '5200')
     ON CONFLICT(key) DO NOTHING
   `).run();
@@ -506,18 +592,73 @@ async function deepSeekGenerator({ person, content, id, root, tempDir, historySn
 export async function createOliviaService(options = {}) {
   const root = resolve(options.root ?? workspaceRoot);
   const dataDir = resolve(options.dataDir ?? join(here, "data"));
+  const mediaIndexRoot = resolve(options.mediaIndexRoot ?? options.midiDataRoot ?? join(dataDir, "media"));
   const appData = resolve(options.appData ?? join(process.env.APPDATA ?? dataDir, "OliviaSoul"));
+  const updateDataRoot = resolve(options.updateDataRoot ?? join(dataDir, "updates"));
+  const updateCurrentTag = String(options.updateCurrentTag ?? DEFAULT_UPDATE_TAG);
+  const updateRepository = String(options.updateRepository ?? DEFAULT_UPDATE_REPOSITORY);
   const runtimeDir = resolve(options.runtimeDir ?? join(here, "runtime"));
+  const usersettingsPath = typeof options.usersettingsPath === "string" && options.usersettingsPath.trim()
+    ? resolve(options.usersettingsPath)
+    : "";
   const archiveDir = join(root, "信件往来");
   const rawArchiveDir = join(root, "信件往来_原始语料");
   const tempDir = join(dataDir, "tmp");
-  const videosDir = join(dataDir, "videos");
+  let videosDir = join(dataDir, "videos");
   await mkdir(dataDir, { recursive: true });
   await mkdir(tempDir, { recursive: true });
   await mkdir(videosDir, { recursive: true });
   await mkdir(archiveDir, { recursive: true });
   await mkdir(rawArchiveDir, { recursive: true });
-  const db = initDatabase(join(dataDir, "olivia-local.sqlite"));
+  await restoreLegacyModelConfig({
+    targetRoot: root,
+    sourceRoots: Array.isArray(options.legacyWorkspaceRoots) ? options.legacyWorkspaceRoots : [],
+    allowImport: options.allowLegacyModelConfigImport === true,
+  });
+  const databasePath = join(dataDir, "olivia-local.sqlite");
+  const db = initDatabase(databasePath);
+  const midiStore = new MidiStore({ db, root: mediaIndexRoot });
+  const resolveSongPreview = createSongPreviewResolver({
+    resolvePath: path => midiStore.resolvePath(path),
+    getLibraryRoot: () => getSetting(MIDI_LIBRARY_ROOT_SETTING),
+  });
+  const storageMigration = createStorageMigrationManager({
+    db,
+    midiStore,
+    ...(options.storageMigrationOptions ?? {}),
+  });
+  const legacyMigration = await mergeLegacyDatabases({
+    targetDb: db,
+    targetPath: databasePath,
+    sourcePaths: Array.isArray(options.legacyDatabasePaths) ? options.legacyDatabasePaths : [],
+    archiveDirs: Array.isArray(options.legacyArchiveDirs) ? options.legacyArchiveDirs : [],
+    backupDir: options.backupDir ?? join(root, "Backups"),
+  });
+  if (legacyMigration.imported || legacyMigration.merged) db.prepare(`
+    INSERT INTO settings(key, value) VALUES(?, '1')
+    ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+  `).run(LETTER_REVISION_SETTING);
+  const songNameCorrections = await createSongNameCorrections({ root, store: midiStore, resolveSongPreview });
+  const midiQueue = options.midiQueue ?? {
+    active: null,
+    pendingCount: 0,
+    enqueue() {},
+    cancel() {},
+    async close() {},
+  };
+  const probeVideoDurationUs = options.midiDurationProbe ?? createVideoDurationProbe({
+    command: options.midiCommands?.ffprobe ?? join(runtimeDir, "ffmpeg", "bin", "ffprobe.exe"),
+  });
+  const midiDurationRepair = new DurationRepair({
+    store: midiStore,
+    probeVideoDurationUs,
+    concurrency: options.midiDurationRepairConcurrency ?? 2,
+  });
+  const midiRoutes = createMidiRoutes({
+    store: midiStore,
+    queue: midiQueue,
+    getNativePlaybackRoot: () => options.nativePlaybackRoot ?? storageStatus.activePath,
+  });
   db.prepare("UPDATE letters SET status = ?, error = ? WHERE status = ?")
     .run(STATUS.FAILED, "回信生成报错", STATUS.LLM_PROCESSING);
   const failedLetters = db.prepare("SELECT id, reply_video FROM letters WHERE status = ?").all(STATUS.FAILED);
@@ -529,6 +670,81 @@ export async function createOliviaService(options = {}) {
   }
   const generator = options.generator ?? deepSeekGenerator;
   const request = options.fetch ?? fetch;
+
+  async function fetchLatestRelease() {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(updateRepository))
+      throw new Error("更新仓库配置无效");
+    const response = await request(`https://api.github.com/repos/${updateRepository}/releases/latest`, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "OliviaSoul-Updater",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
+    const release = await response.json();
+    const latestTag = String(release?.tag_name ?? "").trim();
+    const asset = Array.isArray(release?.assets)
+      ? release.assets.find(item => /OliviaSoul-.*-Setup\.exe$/iu.test(String(item?.name ?? "")))
+      : null;
+    if (!latestTag || !asset) throw new Error("最新 Release 没有安装包");
+    const downloadUrl = new URL(String(asset.browser_download_url ?? ""));
+    if (downloadUrl.protocol !== "https:" || downloadUrl.hostname !== "github.com")
+      throw new Error("安装包下载地址无效");
+    return {
+      latestTag,
+      releaseUrl: String(release.html_url ?? `https://github.com/${updateRepository}/releases/latest`),
+      publishedAt: String(release.published_at ?? ""),
+      asset: {
+        name: basename(String(asset.name)),
+        url: downloadUrl.toString(),
+        size: Math.max(0, Number(asset.size) || 0),
+        digest: String(asset.digest ?? "").trim().toLowerCase(),
+      },
+    };
+  }
+
+  function updatePayload(release) {
+    return {
+      currentTag: updateCurrentTag,
+      latestTag: release.latestTag,
+      updateAvailable: isNewerRelease(updateCurrentTag, release.latestTag),
+      releaseUrl: release.releaseUrl,
+      publishedAt: release.publishedAt,
+      assetName: release.asset.name,
+      assetSize: release.asset.size,
+    };
+  }
+
+  function buildModelProbeCall(profile) {
+    const call = buildChatRequest(profile, {
+      messages: [{ role: "user", content: "只回复 OK，不要解释" }],
+      maxTokens: 128,
+    });
+    call.body.stream = false;
+    return call;
+  }
+
+  async function executeModelProbe(call) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await request(call.url, {
+        method: "POST",
+        headers: call.headers,
+        body: JSON.stringify(call.body),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const content = modelTextFromPayload(payload);
+      if (!content) throw new Error("模型没有返回有效文字");
+      return content;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   const transcriptionEngine = options.transcriptionEngine ?? new TranscriptionEngine({
     runtimeDir,
     modelsDir: options.transcriptionModelsDir ?? join(appData, "models"),
@@ -568,18 +784,482 @@ export async function createOliviaService(options = {}) {
   let workerTimer;
   let workerPromise = null;
   let memoryRetryTimer;
+  let midiLibrarySyncTimer;
+  let midiLibrarySyncPromise = null;
+  let midiLibraryWatcher = null;
+  let midiLibraryWatchedRoot = "";
+  let storagePollTimer;
   let closing = false;
   let lastClientAt = null;
   const memoryBusy = new Set();
   const memoryJobs = new Map();
   const visibleStates = new Map();
   const uploadedTranscriptionFiles = new Map();
+  const midiLibraryPreviews = new Map();
 
   const getSetting = key => db.prepare("SELECT value FROM settings WHERE key = ?").get(key)?.value;
   const setSetting = (key, value) => db.prepare(`
     INSERT INTO settings(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(key, String(value));
+  const storageRevision = () => Math.max(0, Number(getSetting(STORAGE_REVISION_SETTING)) || 0);
+  const migrationHashCache = new Map();
+  async function sha256Path(path) {
+    const info = await stat(path);
+    const cacheKey = process.platform === "win32" ? resolve(path).toLocaleLowerCase() : resolve(path);
+    const fingerprint = `${info.size}:${info.mtimeMs}`;
+    const cached = migrationHashCache.get(cacheKey);
+    if (cached?.fingerprint === fingerprint) return cached.hash;
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(path)) hash.update(chunk);
+    const digest = hash.digest("hex");
+    migrationHashCache.set(cacheKey, { fingerprint, hash: digest });
+    return digest;
+  }
+
+  async function migrateReplyVideos(targetDirectory, fallbackSongPath = "") {
+    const target = resolve(targetDirectory);
+    if (resolve(videosDir) === target) return { copied: 0, missing: 0 };
+    await mkdir(target, { recursive: true });
+    const sourceDirectories = [videosDir];
+    if (fallbackSongPath) sourceDirectories.push(storageDirectories(fallbackSongPath).videoReplies);
+    const operations = [];
+    let missing = 0;
+    for (const row of db.prepare("SELECT id, reply_video FROM letters WHERE reply_video IS NOT NULL").all()) {
+      let source = "";
+      for (const directory of sourceDirectories) {
+        const candidate = join(directory, basename(row.reply_video));
+        try {
+          if ((await stat(candidate)).isFile()) { source = candidate; break; }
+        } catch {
+          // Try the next read-only source directory.
+        }
+      }
+      if (!source) { missing += 1; continue; }
+      const hash = await sha256Path(source);
+      const filename = `${row.id}-${hash.slice(0, 12)}.mp4`;
+      const destination = join(target, filename);
+      let copy = true;
+      try {
+        copy = await sha256Path(destination) !== hash;
+      } catch {
+        copy = true;
+      }
+      operations.push({ id: row.id, source, destination, filename, hash, copy, size: (await stat(source)).size });
+    }
+    const uniqueCopies = new Map();
+    for (const operation of operations.filter(item => item.copy))
+      if (!uniqueCopies.has(operation.destination)) uniqueCopies.set(operation.destination, operation);
+    const requiredBytes = [...uniqueCopies.values()].reduce((sum, item) => sum + item.size, 0);
+    if (requiredBytes > 0) {
+      const disk = await statfs(target, { bigint: true });
+      const rawFree = disk.bavail * disk.bsize;
+      const freeBytes = rawFree > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(rawFree);
+      const capacity = checkMigrationCapacity({ requiredBytes, freeBytes });
+      if (!capacity.sufficient) {
+        const error = Object.assign(new Error("目标磁盘空间不足，视频回信未迁移"), {
+          code: "STORAGE_INSUFFICIENT_SPACE",
+          ...capacity,
+        });
+        throw error;
+      }
+    }
+    const staging = join(dirname(target), ".staging", `video-replies-${randomUUID()}`);
+    try {
+      for (const operation of uniqueCopies.values()) {
+        const staged = join(staging, operation.filename);
+        await mkdir(dirname(staged), { recursive: true });
+        await copyFile(operation.source, staged);
+        if (await sha256Path(staged) !== operation.hash) throw new Error("视频回信复制校验失败");
+        await rename(staged, operation.destination);
+      }
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const update = db.prepare("UPDATE letters SET reply_video = ? WHERE id = ?");
+        for (const operation of operations) update.run(operation.filename, operation.id);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      videosDir = target;
+      return { copied: uniqueCopies.size, missing };
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
+  async function migrationSourceFiles(fallbackSongPath = "") {
+    const files = [];
+    const replyDirectories = [videosDir];
+    if (fallbackSongPath) replyDirectories.push(storageDirectories(fallbackSongPath).videoReplies);
+    for (const row of db.prepare("SELECT reply_video FROM letters WHERE reply_video IS NOT NULL").all()) {
+      for (const directory of replyDirectories) {
+        const candidate = join(directory, basename(row.reply_video));
+        try {
+          if ((await stat(candidate)).isFile()) { files.push(candidate); break; }
+        } catch {
+          // Try the next source.
+        }
+      }
+    }
+    for (const song of midiStore.listPublishedUserSongs()) {
+      for (const storedPath of new Set([song.videoPath, ...Object.values(song.videoByTodView ?? {})].filter(Boolean))) {
+        const candidate = midiStore.resolvePath(storedPath);
+        try {
+          if ((await stat(candidate)).isFile()) files.push(candidate);
+        } catch {
+          // Missing media remains registered with an unavailable reason.
+        }
+      }
+    }
+    return files;
+  }
+
+  async function preflightMediaMigration(targetRoot, fallbackSongPath = "") {
+    const hashes = new Set();
+    let requiredBytes = 0;
+    for (const source of await migrationSourceFiles(fallbackSongPath)) {
+      if (resolve(source).startsWith(`${resolve(targetRoot)}${process.platform === "win32" ? "\\" : "/"}`)) continue;
+      const hash = await sha256Path(source);
+      if (hashes.has(hash)) continue;
+      hashes.add(hash);
+      requiredBytes += (await stat(source)).size;
+    }
+    if (!requiredBytes) return { requiredBytes: 0, freeBytes: 0 };
+    const disk = await statfs(targetRoot, { bigint: true });
+    const rawFree = disk.bavail * disk.bsize;
+    const freeBytes = rawFree > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(rawFree);
+    const capacity = checkMigrationCapacity({ requiredBytes, freeBytes });
+    if (!capacity.sufficient) throw Object.assign(new Error("目标磁盘空间不足，未迁移任何媒体文件"), {
+      code: "STORAGE_INSUFFICIENT_SPACE",
+      ...capacity,
+    });
+    return { requiredBytes, freeBytes };
+  }
+
+  async function migrateOfficialVideos(targetDirectory) {
+    const target = resolve(targetDirectory);
+    await mkdir(target, { recursive: true });
+    const updates = [];
+    const staging = join(dirname(target), ".staging", `official-media-${randomUUID()}`);
+    try {
+      for (const song of midiStore.listPublishedUserSongs()) {
+        const variants = Object.entries(song.videoByTodView ?? {});
+        const sources = variants.length ? variants : [["DEFAULT", song.videoPath]];
+        const migratedVariants = {};
+        let migratedDefault = null;
+        for (const [key, storedPath] of sources) {
+          if (!storedPath) continue;
+          const source = midiStore.resolvePath(storedPath);
+          let info;
+          try {
+            info = await stat(source);
+          } catch {
+            continue;
+          }
+          if (!info.isFile()) continue;
+          const hash = await sha256Path(source);
+          const safeKey = String(key).replace(/[^A-Za-z0-9_-]+/gu, "_") || "DEFAULT";
+          const filename = `${safeKey}-${hash.slice(0, 12)}${extname(source).toLowerCase() || ".mp4"}`;
+          const destination = join(target, song.id, filename);
+          let ready = false;
+          try {
+            ready = await sha256Path(destination) === hash;
+          } catch {
+            ready = false;
+          }
+          if (!ready) {
+            const staged = join(staging, song.id, filename);
+            await mkdir(dirname(staged), { recursive: true });
+            await copyFile(source, staged);
+            if (await sha256Path(staged) !== hash) throw new Error("官方作品复制校验失败");
+            await mkdir(dirname(destination), { recursive: true });
+            await rename(staged, destination);
+          }
+          migratedVariants[key] = `external:${destination}`;
+          if (storedPath === song.videoPath || !migratedDefault) migratedDefault = `external:${destination}`;
+        }
+        if (migratedDefault) updates.push({ id: song.id, videoPath: migratedDefault, variants: migratedVariants });
+      }
+      if (updates.length) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const update = db.prepare(`
+            UPDATE user_songs SET video_path = ?, video_by_tod_view = ?, updated_at = ? WHERE id = ?
+          `);
+          for (const item of updates)
+            update.run(item.videoPath, JSON.stringify(item.variants), nowSeconds(), item.id);
+          db.prepare("UPDATE media_library_meta SET revision = revision + 1 WHERE id = 1").run();
+          db.exec("COMMIT");
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+      }
+      return { migrated: updates.length };
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+  let modelRuntimeStatus = { provider: "", model: "", state: "unconfigured", error: null };
+  let modelRuntimeGeneration = 0;
+  let modelConfigMutationGeneration = 0;
+  let modelConfigWriteTail = Promise.resolve();
+
+  function queueModelConfigWrite(action) {
+    const run = modelConfigWriteTail.then(action, action);
+    modelConfigWriteTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  function assertCurrentModelMutation(generation) {
+    if (generation !== modelConfigMutationGeneration)
+      throw httpError(409, "模型配置已被更新的操作取代，请刷新后重试", "MODEL_CONFIG_SUPERSEDED");
+  }
+
+  function commitModelRuntimeStatus(generation, status) {
+    if (generation === modelRuntimeGeneration) modelRuntimeStatus = status;
+    return modelRuntimeStatus;
+  }
+
+  async function detectActiveModel() {
+    await modelConfigWriteTail;
+    const generation = ++modelRuntimeGeneration;
+    const config = await readModelConfig({ root });
+    const provider = config.activeProvider;
+    const profile = activeModelProfile(config);
+    commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "checking", error: null });
+    try {
+      if (!profile.model || !profile.baseUrl || (profile.authMode === "bearer" && !profile.apiKey)) {
+        commitModelRuntimeStatus(generation, {
+          provider, model: profile.model, state: "unconfigured", error: "当前模型尚未配置完整",
+        });
+      } else {
+        await executeModelProbe(buildModelProbeCall(profile));
+        commitModelRuntimeStatus(generation, { provider, model: profile.model, state: "available", error: null });
+      }
+    } catch (error) {
+      commitModelRuntimeStatus(generation, {
+        provider, model: profile.model, state: "unavailable", error: safeModelError(error),
+      });
+    }
+    return modelRuntimeStatus;
+  }
+  let storageStatus = {
+    configuredPath: "",
+    activePath: "",
+    lastValidPath: "",
+    referencedRoots: [],
+    workCount: 0,
+    referencedFileCount: 0,
+    referencedRootCount: 0,
+    missingFileCount: null,
+    managedPath: "",
+    source: "game-settings",
+    state: "unavailable",
+    requiredBytes: 0,
+    freeBytes: 0,
+    revision: storageRevision(),
+    error: usersettingsPath ? "尚未读取游戏曲目路径" : "尚未配置游戏设置文件",
+  };
+  let storageRefreshPromise = null;
+  const comparableStorageStatus = value => JSON.stringify({
+    configuredPath: value.configuredPath,
+    activePath: value.activePath,
+    lastValidPath: value.lastValidPath,
+    referencedRoots: value.referencedRoots,
+    workCount: value.workCount,
+    referencedFileCount: value.referencedFileCount,
+    referencedRootCount: value.referencedRootCount,
+    missingFileCount: value.missingFileCount,
+    managedPath: value.managedPath,
+    source: value.source,
+    state: value.state,
+    requiredBytes: value.requiredBytes,
+    freeBytes: value.freeBytes,
+    error: value.error,
+  });
+  function publishStorageStatus(next) {
+    let revision = storageRevision();
+    if (comparableStorageStatus(storageStatus) !== comparableStorageStatus(next)) {
+      revision += 1;
+      setSetting(STORAGE_REVISION_SETTING, revision);
+    }
+    storageStatus = { ...next, revision };
+    return storageStatus;
+  }
+
+  function summarizedReferenceRoot(path) {
+    const parent = dirname(path);
+    return /^midi_[^\\/]+$/iu.test(basename(parent)) ? dirname(parent) : parent;
+  }
+
+  function summarizeReferencedRoots() {
+    const roots = new Map();
+    const referencedFiles = new Map();
+    const songs = midiStore.listPublishedUserSongs();
+    for (const song of songs) {
+      const paths = new Set([song.videoPath, ...Object.values(song.videoByTodView ?? {})].filter(Boolean)
+        .map(path => midiStore.resolvePath(path)));
+      const perSong = new Map();
+      for (const path of paths) {
+        const key = process.platform === "win32" ? path.toLocaleLowerCase() : path;
+        if (!referencedFiles.has(key)) referencedFiles.set(key, path);
+        const root = summarizedReferenceRoot(path);
+        const item = perSong.get(root) ?? new Set();
+        item.add(key);
+        perSong.set(root, item);
+      }
+      for (const [root, files] of perSong) {
+        const summary = roots.get(root) ?? { path: root, works: 0, fileKeys: new Set() };
+        summary.works += 1;
+        for (const key of files) summary.fileKeys.add(key);
+        roots.set(root, summary);
+      }
+    }
+    const referencedRoots = [...roots.values()]
+      .map(({ path, works, fileKeys }) => ({ path, works, files: fileKeys.size, missing: null }))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    return {
+      referencedRoots,
+      workCount: songs.length,
+      referencedFileCount: referencedFiles.size,
+      referencedRootCount: referencedRoots.length,
+      missingFileCount: null,
+    };
+  }
+
+  async function selectReplyVideoDirectory(configuredPath, previousPath) {
+    const rows = db.prepare("SELECT reply_video FROM letters WHERE reply_video IS NOT NULL").all();
+    if (!rows.length) {
+      if (configuredPath) videosDir = storageDirectories(configuredPath).videoReplies;
+      await mkdir(videosDir, { recursive: true });
+      return;
+    }
+    const candidates = [...new Set([
+      videosDir,
+      previousPath ? storageDirectories(previousPath).videoReplies : "",
+      configuredPath ? storageDirectories(configuredPath).videoReplies : "",
+    ].filter(Boolean))];
+    for (const directory of candidates) {
+      for (const row of rows) {
+        try {
+          if ((await stat(join(directory, basename(row.reply_video)))).isFile()) {
+            videosDir = directory;
+            return;
+          }
+        } catch {
+          // Continue looking through already referenced directories without copying.
+        }
+      }
+    }
+  }
+
+  async function performStorageRefresh() {
+    if (!usersettingsPath) return storageStatus;
+    const resolved = await resolveSongStoragePath({
+      settingsPath: usersettingsPath,
+      lastValidPath: getSetting(LAST_SONG_STORAGE_PATH_SETTING) ?? "",
+      retryCount: options.storageReadRetryCount ?? 5,
+      retryDelayMs: options.storageReadRetryDelayMs ?? 250,
+    });
+    const previousActivePath = getSetting(LAST_SONG_STORAGE_PATH_SETTING) ?? "";
+    await selectReplyVideoDirectory(resolved.activePath, previousActivePath);
+    if (resolved.state === "ready") setSetting(LAST_SONG_STORAGE_PATH_SETTING, resolved.activePath);
+    const referenceSummary = summarizeReferencedRoots();
+    const next = {
+      ...resolved,
+      activePath: resolved.activePath || previousActivePath,
+      lastValidPath: resolved.activePath || previousActivePath,
+      ...referenceSummary,
+      managedPath: (resolved.activePath || previousActivePath)
+        ? storageDirectories(resolved.activePath || previousActivePath).performances
+        : "",
+      state: (resolved.activePath || previousActivePath) ? "ready" : "unavailable",
+      requiredBytes: 0,
+      freeBytes: 0,
+    };
+    return publishStorageStatus(next);
+  }
+  function refreshStorageStatus() {
+    if (storageRefreshPromise) return storageRefreshPromise;
+    storageRefreshPromise = performStorageRefresh().finally(() => {
+      storageRefreshPromise = null;
+    });
+    return storageRefreshPromise;
+  }
+  if (options.deferStorageRefresh === true && usersettingsPath) {
+    storageStatus = { ...storageStatus, state: "scanning", error: null };
+  } else {
+    await refreshStorageStatus();
+  }
+  const letterRevision = () => Math.max(0, Number(getSetting(LETTER_REVISION_SETTING)) || 0);
+  const bumpLetterRevision = () => {
+    const revision = letterRevision() + 1;
+    setSetting(LETTER_REVISION_SETTING, revision);
+    return revision;
+  };
+  const midiLibrarySyncIntervalMs = Math.max(20, Number(options.midiLibrarySyncIntervalMs ?? 60_000));
+  const midiLibraryWatchFactory = options.midiLibraryWatchFactory ?? watchPerformanceLibrary;
+  const officialMediaDirectory = () => {
+    if (options.officialMediaRoot) return resolve(options.officialMediaRoot);
+    if (!storageStatus.activePath) throw httpError(409, "尚未取得游戏设置的曲目保存路径");
+    return storageDirectories(storageStatus.activePath).performances;
+  };
+
+  function resetMidiLibraryWatcher() {
+    const libraryRoot = String(getSetting(MIDI_LIBRARY_ROOT_SETTING) ?? "").trim();
+    if (libraryRoot === midiLibraryWatchedRoot && midiLibraryWatcher) return;
+    midiLibraryWatcher?.close();
+    midiLibraryWatcher = null;
+    midiLibraryWatchedRoot = libraryRoot;
+    if (!libraryRoot) return;
+    midiLibraryWatcher = midiLibraryWatchFactory({
+      root: libraryRoot,
+      debounceMs: options.midiLibraryWatchDebounceMs ?? 750,
+      onChange: () => {
+        // This callback follows a real filesystem event. Unchanged periodic
+        // library polls must not invalidate the preview source index.
+        resolveSongPreview.invalidate();
+        return syncSavedMidiLibrary();
+      },
+      onError: error => console.error(`[midi-library-watch] ${error instanceof Error ? error.message : error}`),
+    });
+  }
+
+  function syncSavedMidiLibrary() {
+    if (midiLibrarySyncPromise) return midiLibrarySyncPromise;
+    const libraryRoot = String(getSetting(MIDI_LIBRARY_ROOT_SETTING) ?? "").trim();
+    if (!libraryRoot) return Promise.resolve({ imported: 0, skipped: 0, total: 0, mode: "reference", details: [] });
+    midiLibrarySyncPromise = (async () => {
+      const preview = await scanPerformanceLibrary(libraryRoot);
+      return importPerformanceLibrary(preview, {
+        store: midiStore,
+        queue: midiQueue,
+        mode: "reference",
+        managedRoot: officialMediaDirectory(),
+        probeVideoDurationUs,
+      });
+    })().finally(() => {
+      midiLibrarySyncPromise = null;
+    });
+    return midiLibrarySyncPromise;
+  }
+
+  function scheduleMidiLibrarySync() {
+    clearTimeout(midiLibrarySyncTimer);
+    midiLibrarySyncTimer = setTimeout(async () => {
+      try {
+        await syncSavedMidiLibrary();
+      } catch (error) {
+        console.error(`[midi-library-sync] ${error instanceof Error ? error.message : error}`);
+      } finally {
+        if (!closing) scheduleMidiLibrarySync();
+      }
+    }, midiLibrarySyncIntervalMs);
+    midiLibrarySyncTimer.unref?.();
+  }
   db.prepare("UPDATE settings SET value = 'pending' WHERE key LIKE 'memory_state:%' AND value IN ('running', 'paused')").run();
   if (options.delaySeconds !== undefined) setSetting(REPLY_DELAY_SETTING, options.delaySeconds);
   if (options.dailyLetterLimit !== undefined) setSetting(DAILY_LETTER_LIMIT_SETTING, options.dailyLetterLimit);
@@ -678,7 +1358,15 @@ export async function createOliviaService(options = {}) {
     return {
       limit,
       used,
-      remaining: limit === 0 ? null : Math.max(0, limit - used),
+      remaining: Math.max(0, limit - used),
+    };
+  }
+
+  function quotaPayload(quota, admin = false) {
+    return {
+      [admin ? "dailyLetterLimit" : "dailyLimit"]: quota.limit,
+      remainingToday: quota.remaining,
+      revision: letterRevision(),
     };
   }
 
@@ -742,9 +1430,8 @@ export async function createOliviaService(options = {}) {
     }
   }
 
-  async function serveReplyVideo(req, res, row) {
-    const filePath = join(videosDir, row.reply_video);
-    if (!existsSync(filePath)) throw httpError(404, "视频回信文件不存在");
+  async function serveVideoFile(req, res, filePath, missingMessage = "视频文件不存在") {
+    if (!filePath || !existsSync(filePath)) throw httpError(404, missingMessage);
     const fileSize = (await stat(filePath)).size;
     const range = req.headers.range;
     let start = 0;
@@ -781,6 +1468,10 @@ export async function createOliviaService(options = {}) {
     res.writeHead(status, headers);
     if (req.method === "HEAD") return res.end();
     createReadStream(filePath, { start, end }).pipe(res);
+  }
+
+  async function serveReplyVideo(req, res, row) {
+    return serveVideoFile(req, res, join(videosDir, row.reply_video), "视频回信文件不存在");
   }
 
   function visibleLetter(row, req, at = nowSeconds()) {
@@ -825,6 +1516,18 @@ export async function createOliviaService(options = {}) {
     `).all(userId);
   }
 
+  function archiveRows(userId) {
+    return db.prepare(`
+      SELECT letters.*, letter_summaries.summary
+      FROM letters
+      LEFT JOIN letter_summaries
+        ON letter_summaries.letter_id = letters.id
+        AND letter_summaries.content_md5 = letters.content_md5
+      WHERE letters.user_id = ?
+      ORDER BY letters.created_at ASC, letters.rowid ASC
+    `).all(userId);
+  }
+
   function memoryBulk(userId) {
     return db.prepare(
       "SELECT hashes_json, summary FROM memory_bulk_summaries WHERE user_id = ?",
@@ -862,22 +1565,28 @@ export async function createOliviaService(options = {}) {
     };
   }
 
-  function memoryExchange(row, req) {
-    return {
+  function memoryExchange(row, req, archiveView = false) {
+    const replied = row.status === STATUS.REPLIED && Boolean(row.reply_text);
+    const exchange = {
       letterId: row.id,
       date: row.letter_date,
       time: row.letter_time,
       incoming: row.content,
-      reply: row.reply_text,
-      replyLabel: row.reply_label,
+      reply: archiveView && !replied ? "（等待回信）" : row.reply_text,
+      replyLabel: archiveView && !replied ? "等待回信" : row.reply_label,
       contentMd5: row.content_md5,
       summary: row.summary ?? "",
       replyVideoUrl: req ? replyVideoUrl(req, row) : null,
     };
+    if (archiveView) {
+      exchange.stateLabel = replied ? "已回信" : row.status === STATUS.FAILED ? "回信失败" : "等待回信";
+      exchange.readLabel = replied ? row.is_read ? "已读" : "未读" : "";
+    }
+    return exchange;
   }
 
   function memorySourceMd5(userId) {
-    const rows = memoryRows(userId).map(row => ({
+    const rows = archiveRows(userId).map(row => ({
       letterId: row.id,
       order: row.memory_order,
       date: row.letter_date,
@@ -888,6 +1597,8 @@ export async function createOliviaService(options = {}) {
       contentMd5: row.content_md5,
       summary: row.summary ?? "",
       video: row.reply_video ?? "",
+      status: row.status,
+      isRead: row.is_read,
     }));
     const bulk = memoryBulk(userId);
     return createHash("md5").update(JSON.stringify({ rows, bulk }), "utf8").digest("hex");
@@ -908,9 +1619,10 @@ export async function createOliviaService(options = {}) {
   }
 
   async function rebuildArchiveProjection(user = localUser) {
-    const rows = memoryRows(user.id);
+    const rememberedRows = memoryRows(user.id);
+    const rows = archiveRows(user.id);
     const archivePath = join(archiveDir, `${assertPerson(user.person)}.md`);
-    const content = formatArchive(user.person, projectionMemory(user.id, rows), rows.map(row => memoryExchange(row)));
+    const content = formatArchive(user.person, projectionMemory(user.id, rememberedRows), rows.map(row => memoryExchange(row, null, true)));
     const temporaryPath = `${archivePath}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporaryPath, content, "utf8");
@@ -1727,7 +2439,7 @@ export async function createOliviaService(options = {}) {
       "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Allow-Headers": requestedHeaders ?? "Content-Type, x-token, x-uid, x-platform, Authorization",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
       "Vary": "Origin",
     } : {};
   }
@@ -1741,12 +2453,117 @@ export async function createOliviaService(options = {}) {
     sendJson(req, res, { code: 0, message: "success", data }, 200, headers);
   }
 
+  let localPlayerCommand = { revision: 0, command: null };
+  let localPlayerPlayRequest = 0;
+  let localPlayerResolvedSource = null;
+  let localPlayerPendingSeek = null;
+  let localPlayerDurationCheck = null;
+  let durationProbeTail = Promise.resolve();
+  const selectedDurationCache = new Map();
+  let localPlayerState = {
+    revision: 0,
+    commandRevision: 0,
+    sessionId: null,
+    songId: null,
+    name: "",
+    event: "idle",
+    playbackState: "idle",
+    currentTime: 0,
+    duration: 0,
+    mediaUrl: "",
+  };
+
+  function playbackMediaError(status, message, code = "MEDIA_PLAYBACK_UNAVAILABLE") {
+    return Object.assign(httpError(status, message, code), { mediaResponse: true });
+  }
+
+  async function resolvePlaybackSource(song, key) {
+    try {
+      // Use the same identity/root/variant validation as preview recovery. A
+      // corrected display title is never authority to select another video.
+      const file = await resolveSongPreview(song, key);
+      const handle = await open(file, "r");
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || !info.size) throw new Error("Unavailable media");
+      } finally { await handle.close(); }
+      return file;
+    } catch {
+      throw playbackMediaError(404, "官方演奏视频不存在或无法确认对应关系，请检查原导入目录后重试");
+    }
+  }
+
+  function verifySelectedPlaybackDuration(file, sessionId, mediaUrl, blockEnd) {
+    const check = { sessionId, pending: true, blockEnd, sample: null };
+    localPlayerDurationCheck = check;
+    // Do not delay play/stop or start a probe for every file in the library.
+    // Serialize probes; an obsolete queued selection has no work to do.
+    durationProbeTail = durationProbeTail.catch(() => {}).then(async () => {
+      if (closing || localPlayerDurationCheck !== check) return;
+      try {
+        const info = await stat(file);
+        const fingerprint = `${info.size}:${info.mtimeMs}`;
+        let cached = selectedDurationCache.get(file);
+        if (!cached || cached.fingerprint !== fingerprint) {
+          const seconds = Number(await probeVideoDurationUs(file)) / 1_000_000;
+          if (!Number.isFinite(seconds) || seconds <= 0) return;
+          cached = { fingerprint, seconds };
+          if (selectedDurationCache.size >= 64) selectedDurationCache.delete(selectedDurationCache.keys().next().value);
+          selectedDurationCache.set(file, cached);
+        }
+        check.duration = cached.seconds;
+      } catch {
+        // Keep the registered duration and previous stale-event protections
+        // when a file cannot be probed. Do not trust an arbitrary browser value.
+      } finally {
+        check.pending = false;
+        if (!closing && localPlayerDurationCheck === check
+          && localPlayerState.sessionId === sessionId && localPlayerState.mediaUrl === mediaUrl
+          && localPlayerState.playbackState === "playing") {
+          const duration = check.duration ?? localPlayerState.duration;
+          const sample = check.sample?.commandRevision === localPlayerState.commandRevision ? check.sample : null;
+          const tolerance = sample?.event === "ended" ? 1 : 0.35;
+          const ended = sample && duration > 0 && sample.currentTime >= Math.max(0, duration - tolerance);
+          localPlayerState = {
+            ...localPlayerState, revision: localPlayerState.revision + 1, duration,
+            currentTime: ended ? duration : Math.min(localPlayerState.currentTime, duration || localPlayerState.currentTime),
+            ...(ended ? { event: "ended", playbackState: "ended" } : {}),
+          };
+        }
+      }
+    });
+  }
+
+  function validatedLocalPlayerUrl(req, value) {
+    let mediaUrl;
+    try {
+      mediaUrl = new URL(String(value ?? ""));
+    } catch {
+      throw httpError(400, "播放地址无效");
+    }
+    const expectedOrigin = `http://${req.headers.host || "127.0.0.1:27149"}`;
+    if (mediaUrl.origin !== expectedOrigin
+      || !/^\/toy\/midi\/songs\/[^/]+\/(?:video(?:\.mp4)?|[A-Za-z0-9_-]+\.mp4)$/u.test(mediaUrl.pathname)) {
+      throw httpError(400, "播放器只接受当前本地服务提供的作品地址");
+    }
+    return mediaUrl.toString();
+  }
+
+  function localPlayerSongIdFromUrl(value) {
+    const match = /^\/toy\/midi\/songs\/([^/]+)\//u.exec(new URL(value).pathname);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
   async function serveStatic(req, res, pathname) {
     const relative = pathname === "/admin" || pathname === "/admin/" ? "index.html" : pathname.slice("/admin/".length);
-    if (!["index.html", "app.js", "styles.css", "olivia-soul-gold.png"].includes(relative)) throw httpError(404, "文件不存在");
+    if (!["index.html", "app.js", "song-editor.js", "styles.css", "olivia-soul-gold.png"].includes(relative))
+      throw httpError(404, "文件不存在");
     const file = join(publicRoot, relative);
     const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png" };
-    res.writeHead(200, { "Content-Type": types[extname(file)] });
+    res.writeHead(200, {
+      "Content-Type": types[extname(file)],
+      "Cache-Control": "no-store",
+    });
     res.end(await readFile(file));
   }
 
@@ -1762,6 +2579,301 @@ export async function createOliviaService(options = {}) {
       return res.end();
     }
     if (path.startsWith("/toy/")) lastClientAt = nowSeconds();
+
+    const songMetadataMatch = /^\/(?:admin\/api|toy)\/media\/songs\/([^/]+)\/metadata$/u.exec(path);
+    if (songMetadataMatch && (req.method === "GET" || req.method === "POST")) {
+      const id = decodeURIComponent(songMetadataMatch[1]);
+      let song = midiStore.getUserSong(id);
+      if (!song || song.sourceKind === "upload" || song.jobId)
+        throw httpError(404, "作品不存在", "MIDI_SONG_NOT_FOUND");
+      if (req.method === "POST") {
+        const patch = await readJson(req);
+        if (!patch || typeof patch !== "object" || Array.isArray(patch)
+          || !Object.keys(patch).length
+          || Object.keys(patch).some(key => !["name", "permanentName", "timeOfDayMapping"].includes(key)))
+          throw httpError(400, "仅支持修改作品名称和时段对应关系", "MIDI_SONG_METADATA_INVALID");
+        try {
+          song = await songNameCorrections.save(id, patch);
+        } catch (error) {
+          if (error.code === "MIDI_SONG_NAME_INVALID")
+            throw httpError(400, "名称须为 1–200 个字符，不能包含控制字符", error.code);
+          if (error.code === "MIDI_SONG_MAPPING_INVALID")
+            throw httpError(400, "请选择这首作品已有的视频文件", error.code);
+          throw error;
+        }
+        // Metadata is not a playback command. Keep the active URL, session,
+        // command revision and progress intact, including during a clock change.
+        if (localPlayerState.songId === id && localPlayerState.name !== song.name) {
+          localPlayerState = { ...localPlayerState, name: song.name, revision: localPlayerState.revision + 1 };
+        }
+      }
+      const metadata = describeSongMetadata({ ...song, nameSync: songNameCorrections.status(song.id) }, req);
+      // Preview is independent of time selection and the desktop player. Keep
+      // ordinary playback URLs untouched, including their session generation.
+      metadata.variants = metadata.variants.map(variant => ({ ...variant,
+        url: `http://${req.headers.host}/toy/media/songs/${encodeURIComponent(song.id)}/preview.mp4?variant=${encodeURIComponent(variant.key)}`,
+      }));
+      return ok(req, res, { ...metadata, revision: midiStore.libraryRevision() });
+    }
+
+    const songPreviewMatch = /^\/toy\/media\/songs\/([^/]+)\/preview\.mp4$/u.exec(path);
+    if (songPreviewMatch && (req.method === "GET" || req.method === "HEAD")) {
+      try {
+        const song = midiStore.getUserSong(decodeURIComponent(songPreviewMatch[1]));
+        const source = await resolveSongPreview(song, url.searchParams.get("variant"));
+        return await serveVideoFile(req, res, source, "预览文件不存在，请检查原导入目录后重试");
+      } catch (error) {
+        error.mediaResponse = true;
+        throw error;
+      }
+    }
+
+    if (req.method === "GET" && path === "/toy/player-command") {
+      return ok(req, res, localPlayerCommand, { "Cache-Control": "no-store" });
+    }
+    if (req.method === "POST" && path === "/toy/player-command") {
+      const body = await readJson(req);
+      const requestedCmd = String(body.cmd ?? "");
+      const supportedCommands = new Set(["play", "pause", "resume", "stop", "seek", "setVolume", "setMute", "setLoop"]);
+      if (!supportedCommands.has(requestedCmd)) throw httpError(400, "播放器命令无效");
+      // The game presents pause as closing the current performance. Keep accepting
+      // the legacy command, but publish one terminal stop transition everywhere.
+      const cmd = requestedCmd === "pause" ? "stop" : requestedCmd;
+      let command;
+      let songId;
+      let name;
+      let selectedVideoPath;
+      let selectedVideoKey;
+      if (cmd === "play") {
+        const mediaUrl = validatedLocalPlayerUrl(req, body.url);
+        const urlSongId = localPlayerSongIdFromUrl(mediaUrl);
+        songId = String(body.songId ?? urlSongId).trim();
+        if (!songId || songId !== urlSongId) throw httpError(400, "作品与播放地址不匹配");
+        const song = midiStore.getUserSong(songId);
+        if (!song?.videoPath) throw playbackMediaError(404, "官方演奏视频不存在");
+        const sessionId = randomUUID();
+        const playbackUrl = new URL(mediaUrl);
+        const view = songVariants(song).find(item => item.key === playbackUrl.searchParams.get("variant"))?.view
+          ?? (["NI", "WI"].includes(body.view) ? body.view : "NI");
+        const tod = playbackTimeOfDay(options.playbackNow?.() ?? new Date());
+        const selected = selectSongVariant(song, tod, view);
+        if (!selected.path) throw playbackMediaError(404, "官方演奏视频不存在");
+        const request = ++localPlayerPlayRequest;
+        const identity = JSON.stringify([song.contentHash, song.sourceKind, song.videoPath, songVariants(song)]);
+        selectedVideoPath = await resolvePlaybackSource(song, selected.key);
+        if (closing || request !== localPlayerPlayRequest)
+          throw playbackMediaError(409, "播放请求已被后一次操作替代", "MEDIA_PLAYBACK_SUPERSEDED");
+        const current = midiStore.getUserSong(songId);
+        if (!current || JSON.stringify([current.contentHash, current.sourceKind, current.videoPath, songVariants(current)]) !== identity)
+          throw playbackMediaError(409, "作品内容已变化，请重新选择播放", "MEDIA_PLAYBACK_SOURCE_CHANGED");
+        name = current.name;
+        selectedVideoKey = selected.key;
+        // Resolve only within this work's registered variants at a new play.
+        // Later progress/seek/volume commands never re-evaluate the clock.
+        playbackUrl.searchParams.set("variant", selected.key);
+        // A generation-specific URL prevents a delayed event from the previous
+        // video element being accepted as the new session during same-song replay.
+        playbackUrl.searchParams.set("playSession", sessionId);
+        command = { cmd, url: playbackUrl.toString(), songId, name, sessionId, loop: false };
+      } else {
+        songId = String(body.songId ?? "").trim();
+        if (!songId || songId !== localPlayerState.songId) throw httpError(409, "当前作品已经切换");
+        const sessionId = String(body.sessionId ?? "").trim();
+        if (!sessionId || sessionId !== localPlayerState.sessionId)
+          throw httpError(409, "当前演奏会话已经切换");
+        if (cmd === "resume" && localPlayerState.playbackState !== "paused")
+          throw httpError(409, "当前演奏已经结束，无法继续播放");
+        name = localPlayerState.name;
+        command = { cmd, songId, sessionId };
+        if (cmd === "seek") {
+          const offset = Number(body.offset);
+          if (!Number.isFinite(offset) || offset < 0) throw httpError(400, "拖动位置无效");
+          command.offset = localPlayerState.duration > 0
+            ? Math.min(offset, localPlayerState.duration)
+            : offset;
+        } else if (cmd === "setVolume") {
+          const volume = Number(body.volume);
+          if (!Number.isFinite(volume) || volume < 0 || volume > 100) throw httpError(400, "音量无效");
+          command.volume = volume;
+        } else if (cmd === "setMute") {
+          command.mute = Boolean(body.mute);
+        } else if (cmd === "setLoop") {
+          command.loop = Boolean(body.loop);
+        } else if (cmd === "stop") {
+          command.restoreDefault = requestedCmd === "pause" ? true : body.restoreDefault !== false;
+          ++localPlayerPlayRequest;
+        }
+      }
+      if (cmd === "play") localPlayerResolvedSource = {
+        sessionId: command.sessionId, songId, key: selectedVideoKey, path: selectedVideoPath,
+      };
+      else if (cmd === "stop") localPlayerResolvedSource = null;
+      localPlayerCommand = {
+        revision: localPlayerCommand.revision + 1,
+        command,
+      };
+      const previousState = localPlayerState;
+      const song = cmd === "play" ? midiStore.getUserSong(songId) : null;
+      const knownDuration = song?.durationUs > 0 ? song.durationUs / 1_000_000 : 0;
+      const playbackState = cmd === "play" || cmd === "resume"
+        ? "playing"
+        : cmd === "pause"
+          ? "paused"
+          : cmd === "stop"
+            ? "stopped"
+            : previousState.playbackState;
+      const currentTime = cmd === "play" || cmd === "stop"
+        ? 0
+        : cmd === "seek"
+          ? command.offset
+          : previousState.currentTime;
+      if (cmd === "seek") {
+        if (localPlayerDurationCheck) localPlayerDurationCheck.sample = null;
+        localPlayerPendingSeek = {
+          commandRevision: localPlayerCommand.revision,
+          offset: command.offset,
+          expiresAt: Date.now() + 2_000,
+        };
+      } else if (cmd === "play" || cmd === "stop") {
+        localPlayerPendingSeek = null;
+      }
+      localPlayerState = {
+        revision: previousState.revision + 1,
+        commandRevision: localPlayerCommand.revision,
+        sessionId: command.sessionId,
+        songId,
+        name,
+        event: cmd,
+        playbackState,
+        currentTime,
+        duration: cmd === "play" ? knownDuration : previousState.duration,
+        mediaUrl: cmd === "play" ? command.url : previousState.mediaUrl,
+      };
+      if (cmd === "play") verifySelectedPlaybackDuration(selectedVideoPath, command.sessionId, command.url,
+        selectedVideoPath !== midiStore.resolvePath(song.videoPath));
+      else if (cmd === "stop") localPlayerDurationCheck = null;
+      console.log(`[player-command] revision=${localPlayerCommand.revision} cmd=${cmd} song=${songId}`);
+      return ok(req, res, localPlayerCommand, { "Cache-Control": "no-store" });
+    }
+    if (req.method === "GET" && path === "/toy/player-state") {
+      return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+    }
+    if (req.method === "POST" && path === "/toy/player-state") {
+      const body = await readJson(req);
+      const commandRevision = Number(body.commandRevision);
+      if (!Number.isInteger(commandRevision) || commandRevision < 1)
+        throw httpError(400, "播放命令版本无效");
+      if (commandRevision !== localPlayerCommand.revision)
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      const songId = String(body.songId ?? "").trim();
+      if (!songId || songId !== localPlayerState.songId)
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      const sessionId = String(body.sessionId ?? "").trim();
+      if (!sessionId || sessionId !== localPlayerState.sessionId)
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      let mediaUrl;
+      try {
+        mediaUrl = validatedLocalPlayerUrl(req, body.mediaUrl);
+      } catch {
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      }
+      if (localPlayerSongIdFromUrl(mediaUrl) !== songId || mediaUrl !== localPlayerState.mediaUrl)
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      if (body.event !== "timeupdate" && body.event !== "ended")
+        throw httpError(400, "播放状态事件无效");
+      const duration = Number(body.duration);
+      const currentTime = Number(body.currentTime);
+      if (!Number.isFinite(currentTime) || currentTime < 0 || !Number.isFinite(duration) || duration < 0)
+        throw httpError(400, "播放时间无效");
+      if (body.event === "timeupdate" && localPlayerState.playbackState !== "playing")
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      if (body.event === "timeupdate" && localPlayerPendingSeek?.commandRevision === commandRevision) {
+        const closeToRequestedTime = Math.abs(currentTime - localPlayerPendingSeek.offset) <= 2;
+        if (!closeToRequestedTime && Date.now() < localPlayerPendingSeek.expiresAt)
+          return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+        localPlayerPendingSeek = null;
+      }
+      // The WebPlayer uses two video elements while changing tracks. During the
+      // hand-off, a late timeupdate from the previous element can briefly report
+      // that element's duration (often about two seconds).  Once the service has
+      // resolved an imported work, its selected file's verified duration (or
+      // registered fallback) is authoritative, never a stale two-second value.
+      const durationPending = localPlayerDurationCheck?.pending === true
+        && localPlayerDurationCheck.blockEnd
+        && localPlayerDurationCheck.sessionId === sessionId;
+      if (durationPending) localPlayerDurationCheck.sample = { currentTime, event: body.event, commandRevision };
+      const knownDuration = Number(localPlayerState.duration);
+      const normalizedDuration = Number.isFinite(knownDuration) && knownDuration > 0
+        ? knownDuration
+        : duration;
+      if (body.event === "ended"
+        && !durationPending
+        && normalizedDuration > 0
+        && currentTime < Math.max(0, normalizedDuration - 1))
+        return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+      const reachedNaturalEnd = !durationPending && (body.event === "ended"
+        || (body.event === "timeupdate"
+          && normalizedDuration > 0
+          && currentTime >= Math.max(0, normalizedDuration - 0.35)));
+      const normalizedEvent = reachedNaturalEnd ? "ended" : durationPending ? "timeupdate" : body.event;
+      const playbackState = reachedNaturalEnd ? "ended" : localPlayerState.playbackState;
+      localPlayerState = {
+        revision: localPlayerState.revision + 1,
+        commandRevision,
+        sessionId,
+        songId,
+        name: localPlayerState.name,
+        event: normalizedEvent,
+        playbackState,
+        currentTime: reachedNaturalEnd
+          ? normalizedDuration
+          : durationPending ? currentTime : Math.min(currentTime, normalizedDuration || currentTime),
+        duration: normalizedDuration,
+        mediaUrl,
+      };
+      return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
+    }
+
+    const midiVideoMatch = /^\/(?:toy\/)?midi\/(jobs|songs)\/([^/]+)\/(?:video(?:\.mp4)?|[A-Za-z0-9_-]+\.mp4)$/u.exec(path);
+    if ((req.method === "GET" || req.method === "HEAD") && midiVideoMatch) {
+      try {
+        const id = decodeURIComponent(midiVideoMatch[2]);
+        const isSong = midiVideoMatch[1] === "songs";
+        const item = isSong ? midiStore.getUserSong(id) : midiStore.getJob(id);
+        const variant = url.searchParams.get("variant");
+        console.log(
+          `[media-request] method=${req.method} kind=${midiVideoMatch[1]} id=${id} variant=${variant ?? "default"} range=${req.headers.range ?? "none"}`,
+        );
+        let file;
+        if (isSong) {
+          const key = variant || (item && songVariants(item).find(entry => entry.path === item.videoPath)?.key);
+          const session = url.searchParams.get("playSession");
+          if (session) {
+            const source = localPlayerResolvedSource;
+            if (!item || !source || source.sessionId !== session || source.songId !== id || source.key !== key)
+              throw playbackMediaError(409, "演奏会话已经切换，请重新播放", "MEDIA_PLAYBACK_SESSION_EXPIRED");
+            // Pin the resolved path for every Range request in this session;
+            // never swap cache/original bytes midway through a seek.
+            file = source.path;
+          } else {
+            file = await resolvePlaybackSource(item, key);
+          }
+        } else {
+          if (!item?.videoPath) throw playbackMediaError(404, "官方演奏视频不存在");
+          file = midiStore.resolvePath(item.videoPath);
+        }
+        await serveVideoFile(req, res, file, "官方演奏视频不存在");
+        return;
+      } catch (error) {
+        // Binary media failures must not use the legacy toy API's HTTP-200
+        // envelope: a player cannot decode error JSON as an MP4.
+        error.mediaResponse = true;
+        throw error;
+      }
+    }
+
+    const midiResult = await midiRoutes(req, url);
+    if (midiResult !== null) return ok(req, res, midiResult);
 
     if (req.method === "POST" && path === "/toy/signIn") {
       const body = await readJson(req);
@@ -1790,7 +2902,7 @@ export async function createOliviaService(options = {}) {
     if (req.method === "POST" && path === "/toy/letter/send") {
       const user = getLocalUser();
       const quota = letterQuota(user.id);
-      if (quota.limit > 0 && quota.remaining === 0)
+      if (quota.remaining === 0)
         throw httpError(429, `今天最多发送 ${quota.limit} 封信`, -10401);
       const body = await readJson(req);
       const content = String(body.content ?? "").trim();
@@ -1802,11 +2914,13 @@ export async function createOliviaService(options = {}) {
         INSERT INTO letters(id, user_id, person, content, material_json, status, created_at, available_at)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, user.id, user.person, content, body.material ? JSON.stringify(normalizeMaterial(body.material)) : null, STATUS.PENDING, createdAt, createdAt + delay);
+      bumpLetterRevision();
+      await rebuildArchiveProjection(user);
       console.log(`[letter-send] id=${id} delay=${delay} memoryState=${getMemoryStatus(user.person).state} memoryJob=${memoryJobs.has(user.person)}`);
       triggerMemoryRefresh(user.person);
       wakeWorker();
       const nextQuota = letterQuota(user.id);
-      return ok(req, res, { letterId: id, dailyLimit: nextQuota.limit, remainingToday: nextQuota.remaining });
+      return ok(req, res, { letterId: id, ...quotaPayload(nextQuota) });
     }
 
     if (req.method === "GET" && path === "/toy/letter/list") {
@@ -1818,7 +2932,7 @@ export async function createOliviaService(options = {}) {
       const hasMore = rows.length > pageSize;
       const list = rows.slice(0, pageSize).map(row => visibleLetter(row, req));
       const quota = letterQuota(user.id);
-      return ok(req, res, { list, hasMore, nextCursor: hasMore ? cursor + pageSize : 0, total: Number(db.prepare("SELECT COUNT(*) count FROM letters WHERE user_id = ?").get(user.id).count), dailyLimit: quota.limit, remainingToday: quota.remaining });
+      return ok(req, res, { list, hasMore, nextCursor: hasMore ? cursor + pageSize : 0, total: Number(db.prepare("SELECT COUNT(*) count FROM letters WHERE user_id = ?").get(user.id).count), ...quotaPayload(quota) });
     }
 
     const videoReadMatch = /^\/toy\/letter\/video\/([^/]+)$/u.exec(path);
@@ -1835,7 +2949,10 @@ export async function createOliviaService(options = {}) {
       const row = db.prepare("SELECT * FROM letters WHERE id = ?").get(id);
       if (!row) throw httpError(404, "信件不存在");
       const value = visibleLetter(row, req);
-      if (value.letterStatus === STATUS.REPLIED) db.prepare("UPDATE letters SET is_read = 1 WHERE id = ?").run(id);
+      if (value.letterStatus === STATUS.REPLIED && !row.is_read) {
+        db.prepare("UPDATE letters SET is_read = 1 WHERE id = ?").run(id);
+        await rebuildArchiveProjection(getLocalUser());
+      }
       value.isRead = value.letterStatus === STATUS.REPLIED ? 1 : value.isRead;
       return ok(req, res, value);
     }
@@ -1850,7 +2967,7 @@ export async function createOliviaService(options = {}) {
     if (req.method === "POST" && path === "/toy/letter/resend") {
       const user = getLocalUser();
       const quota = letterQuota(user.id);
-      if (quota.limit > 0 && quota.remaining === 0)
+      if (quota.remaining === 0)
         throw httpError(429, `今天最多发送 ${quota.limit} 封信`, -10401);
       const body = await readJson(req);
       const letterId = body.letterId ?? body.letter_id;
@@ -1915,14 +3032,16 @@ export async function createOliviaService(options = {}) {
     }
 
     function playlistItemPayload(row) {
-      const duration = playlistDuration(row.duration);
-      const videoDuration = playlistDuration(row.video_duration) || duration;
-      const videoByTodView = playlistTodViewRead(row.video_by_tod_view);
+      const localSong = midiStore.getUserSong(row.item_id);
+      const localMedia = localSong?.videoPath ? formatSong(localSong, req) : null;
+      const duration = localMedia?.duration || playlistDuration(row.duration);
+      const videoDuration = localMedia?.videoDuration || playlistDuration(row.video_duration) || duration;
+      const videoByTodView = localMedia?.videoByTodView ?? playlistTodViewRead(row.video_by_tod_view);
       return {
         itemType: row.item_type,
         itemId: row.item_id,
         id: row.item_id,
-        name: row.name || row.item_id,
+        name: localMedia?.name || row.name || row.item_id,
         nameKey: row.name_key || "",
         iconUrl: row.icon_url || "",
         coverUrl: row.icon_url || "",
@@ -1930,8 +3049,8 @@ export async function createOliviaService(options = {}) {
         performanceId: row.performance_id || (row.item_type === 1 ? row.item_id : ""),
         duration,
         videoDuration,
-        videoUrl: row.video_url || "",
-        performanceType: row.performance_type || "",
+        videoUrl: localMedia?.videoUrl || row.video_url || "",
+        performanceType: localMedia?.performanceType || row.performance_type || "",
         videoByTodView,
       };
     }
@@ -2028,12 +3147,12 @@ export async function createOliviaService(options = {}) {
       if (!row || row.status !== STATUS.REPLIED || !row.reply_text) throw httpError(404, "对应回信不存在");
       if (req.method === "POST") {
         const updated = await saveReplyVideo(req, row);
-        if (updated.memory_order !== null) await rebuildArchiveProjection(localUser);
+        await rebuildArchiveProjection(localUser);
         return ok(req, res, { letterId: updated.id, replyVideoUrl: replyVideoUrl(req, updated) });
       }
       if (row.reply_video) await rm(join(videosDir, row.reply_video), { force: true });
       db.prepare("UPDATE letters SET reply_video = NULL, reply_type = 1 WHERE id = ?").run(row.id);
-      if (row.memory_order !== null) await rebuildArchiveProjection(localUser);
+      await rebuildArchiveProjection(localUser);
       return ok(req, res, { letterId: row.id, replyVideoUrl: null });
     }
 
@@ -2049,6 +3168,51 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "GET" && path === "/admin/api/status") {
       return ok(req, res, { ready: true, person: localUser.person });
+    }
+
+    if (req.method === "GET" && path === "/admin/api/storage")
+      return ok(req, res, storageStatus);
+
+    if (req.method === "POST" && path === "/admin/api/storage/refresh")
+      return ok(req, res, await refreshStorageStatus());
+
+    if (req.method === "POST" && path === "/admin/api/storage/migration/preview") {
+      if (!storageStatus.activePath) throw httpError(409, "尚未取得游戏设置的曲目保存路径");
+      return ok(req, res, storageMigration.startPreview({ targetRoot: storageStatus.activePath }));
+    }
+
+    const storagePreviewStatusMatch = /^\/admin\/api\/storage\/migration\/preview\/([^/]+)$/u.exec(path);
+    if (req.method === "GET" && storagePreviewStatusMatch) {
+      try {
+        return ok(req, res, storageMigration.getPreview(decodeURIComponent(storagePreviewStatusMatch[1])));
+      } catch (error) {
+        if (error.code === "MIGRATION_PREVIEW_JOB_NOT_FOUND") error.status = 404;
+        throw error;
+      }
+    }
+
+    const storagePreviewCancelMatch = /^\/admin\/api\/storage\/migration\/preview\/([^/]+)\/cancel$/u.exec(path);
+    if (req.method === "POST" && storagePreviewCancelMatch) {
+      try {
+        return ok(req, res, storageMigration.cancelPreview(decodeURIComponent(storagePreviewCancelMatch[1])));
+      } catch (error) {
+        if (error.code === "MIGRATION_PREVIEW_JOB_NOT_FOUND") error.status = 404;
+        throw error;
+      }
+    }
+
+    if (req.method === "POST" && path === "/admin/api/storage/migration/confirm") {
+      const body = await readJson(req);
+      try {
+        const result = await storageMigration.confirm({ token: body.token, confirmed: body.confirmed });
+        await refreshStorageStatus();
+        return ok(req, res, result);
+      } catch (error) {
+        if (["MIGRATION_CONFIRMATION_REQUIRED", "MIGRATION_PREVIEW_NOT_FOUND", "MIGRATION_PREVIEW_EXPIRED"].includes(error.code))
+          error.status = 400;
+        else if (String(error.code ?? "").startsWith("MIGRATION_")) error.status = 409;
+        throw error;
+      }
     }
 
     if (req.method === "POST" && path === "/admin/api/transcription") {
@@ -2140,8 +3304,7 @@ export async function createOliviaService(options = {}) {
       return ok(req, res, {
         delaySeconds: Number(getSetting(REPLY_DELAY_SETTING)),
         defaultDelaySeconds: REPLY_DELAY_SECONDS,
-        dailyLetterLimit: quota.limit,
-        remainingToday: quota.remaining,
+        ...quotaPayload(quota, true),
         bulkSummary: bulk?.summary ?? "",
       });
     }
@@ -2162,23 +3325,144 @@ export async function createOliviaService(options = {}) {
     if (req.method === "POST" && path === "/admin/api/debug/quota/reset") {
       const user = getLocalUser();
       const quota = resetTodayQuota(user.id);
-      return ok(req, res, { dailyLetterLimit: quota.limit, remainingToday: quota.remaining });
+      bumpLetterRevision();
+      return ok(req, res, quotaPayload(quota, true));
     }
 
     if (req.method === "POST" && path === "/admin/api/debug/quota/limit") {
       const limit = Number((await readJson(req)).limit);
       if (!Number.isInteger(limit) || limit < 0 || limit > MAX_DAILY_LETTER_LIMIT)
-        throw httpError(400, `每日写信上限必须是 0–${MAX_DAILY_LETTER_LIMIT} 的整数，0 表示不限次数`);
+        throw httpError(400, `每日写信上限必须是 0–${MAX_DAILY_LETTER_LIMIT} 的整数，0 表示当天不能写信`);
       setSetting(DAILY_LETTER_LIMIT_SETTING, limit);
+      bumpLetterRevision();
       const quota = letterQuota(getLocalUser().id);
-      return ok(req, res, { dailyLetterLimit: quota.limit, remainingToday: quota.remaining });
+      return ok(req, res, quotaPayload(quota, true));
+    }
+
+    if (req.method === "GET" && path === "/admin/api/update") {
+      try {
+        return ok(req, res, updatePayload(await fetchLatestRelease()));
+      } catch (error) {
+        throw httpError(502, `检查更新失败：${safeModelError(error)}`);
+      }
+    }
+
+    if (req.method === "POST" && path === "/admin/api/update/download") {
+      let release;
+      try {
+        release = await fetchLatestRelease();
+      } catch (error) {
+        throw httpError(502, `检查更新失败：${safeModelError(error)}`);
+      }
+      if (!isNewerRelease(updateCurrentTag, release.latestTag))
+        throw httpError(409, "当前已经是最新版本");
+      if (release.asset.size > MAX_UPDATE_BYTES) throw httpError(413, "更新安装包超过 1 GiB");
+      const targetDir = join(updateDataRoot, release.latestTag);
+      const target = join(targetDir, release.asset.name);
+      const temporary = `${target}.part-${randomUUID()}`;
+      await mkdir(targetDir, { recursive: true });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+      try {
+        const response = await request(release.asset.url, {
+          headers: { "User-Agent": "OliviaSoul-Updater" },
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error(`下载 HTTP ${response.status}`);
+        const contentLength = Number(response.headers.get("content-length") ?? 0);
+        if (contentLength > MAX_UPDATE_BYTES) throw new Error("更新安装包超过 1 GiB");
+        let bytes = 0;
+        const hash = createHash("sha256");
+        const meter = new Transform({
+          transform(chunk, _encoding, callback) {
+            bytes += chunk.length;
+            if (bytes > MAX_UPDATE_BYTES) return callback(new Error("更新安装包超过 1 GiB"));
+            hash.update(chunk);
+            callback(null, chunk);
+          },
+        });
+        await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(temporary, { flags: "wx" }));
+        if (release.asset.size && bytes !== release.asset.size)
+          throw new Error(`安装包大小不完整：${bytes}/${release.asset.size}`);
+        const digest = hash.digest("hex");
+        if (release.asset.digest.startsWith("sha256:") && digest !== release.asset.digest.slice(7))
+          throw new Error("安装包 SHA-256 校验失败");
+        await rename(temporary, target);
+        return ok(req, res, { tag: release.latestTag, path: target, bytes, sha256: digest });
+      } catch (error) {
+        await rm(temporary, { force: true });
+        throw httpError(502, `下载更新失败：${safeModelError(error)}`);
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     if (req.method === "GET" && path === "/admin/api/model") {
       return ok(req, res, modelConfigPayload(await readModelConfig({ root })));
     }
 
+    if (req.method === "POST" && path === "/admin/api/models/reset") {
+      modelRuntimeGeneration += 1;
+      modelConfigMutationGeneration += 1;
+      const config = await queueModelConfigWrite(() => resetModelConfig({ root }));
+      const profile = activeModelProfile(config);
+      modelRuntimeStatus = {
+        provider: config.activeProvider,
+        model: profile.model,
+        state: "unconfigured",
+        error: null,
+      };
+      return ok(req, res, modelConfigPayload(config));
+    }
+
+    if (req.method === "GET" && path === "/admin/api/model/status")
+      return ok(req, res, modelRuntimeStatus);
+
+    if (req.method === "POST" && path === "/admin/api/model/detect")
+      return ok(req, res, await detectActiveModel());
+
+    if (["/admin/api/local-ai/process", "/admin/api/local-ai/start", "/admin/api/local-ai/stop"].includes(path))
+      throw httpError(410, "本地 AI 进程管理已移除，请先独立启动兼容 API 服务", "LOCAL_AI_PROCESS_REMOVED");
+
+    if (req.method === "POST" && path === "/admin/api/model/models") {
+      const body = await readJson(req);
+      const config = await readModelConfig({ root });
+      const provider = String(body.provider ?? config.activeProvider).trim();
+      const previous = config.profiles[provider];
+      if (!previous) throw httpError(400, "provider 只能是 deepseek 或 local");
+      let call;
+      try {
+        call = buildModelListRequest({
+          provider,
+          baseUrl: body.baseUrl ?? previous.baseUrl,
+          authMode: body.authMode ?? previous.authMode,
+          apiKey: body.apiKey === undefined ? previous.apiKey : body.apiKey,
+        });
+      } catch (error) {
+        throw httpError(400, safeModelError(error));
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      try {
+        const response = await request(call.url, {
+          method: "GET",
+          headers: call.headers,
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const models = modelIdsFromPayload(await response.json());
+        if (!models.length) throw new Error("接口没有返回可用模型");
+        return ok(req, res, { provider, models });
+      } catch (error) {
+        throw httpError(502, `模型列表查询失败：${safeModelError(error)}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     if (req.method === "POST" && path === "/admin/api/model/profile") {
+      await modelConfigWriteTail;
+      const operationGeneration = ++modelConfigMutationGeneration;
       const body = await readJson(req);
       const current = await readModelConfig({ root });
       const provider = String(body.provider ?? "").trim();
@@ -2187,28 +3471,93 @@ export async function createOliviaService(options = {}) {
       const suppliedKey = body.apiKey === undefined ? previous.apiKey : String(body.apiKey).trim();
       const apiKey = provider === "deepseek" && !suppliedKey ? previous.apiKey : suppliedKey;
       try {
-        const saved = await writeModelProfile({
-          root,
-          provider,
-          profile: {
-            baseUrl: body.baseUrl ?? previous.baseUrl,
-            model: body.model ?? previous.model,
-            authMode: body.authMode ?? previous.authMode,
-            apiKey,
-          },
+        const saved = await queueModelConfigWrite(async () => {
+          assertCurrentModelMutation(operationGeneration);
+          const result = await writeModelProfile({
+            root,
+            provider,
+            profile: {
+              baseUrl: body.baseUrl ?? previous.baseUrl,
+              model: body.model ?? previous.model,
+              authMode: body.authMode ?? previous.authMode,
+              apiKey,
+            },
+          });
+          assertCurrentModelMutation(operationGeneration);
+          return result;
         });
         return ok(req, res, modelConfigPayload(saved));
       } catch (error) {
+        if (error.status === 409) throw error;
         throw httpError(400, safeModelError(error));
       }
     }
 
     if (req.method === "POST" && path === "/admin/api/model/activate") {
+      await modelConfigWriteTail;
+      const operationGeneration = ++modelConfigMutationGeneration;
       const provider = String((await readJson(req)).provider ?? "").trim();
+      const config = await readModelConfig({ root });
+      const profile = config.profiles[provider];
+      if (!profile) throw httpError(400, "provider 只能是 deepseek 或 local");
+      let call;
       try {
-        const saved = await setActiveProvider({ root, provider });
-        return ok(req, res, modelConfigPayload(saved));
+        call = buildModelProbeCall(profile);
       } catch (error) {
+        throw httpError(400, safeModelError(error));
+      }
+      try {
+        await executeModelProbe(call);
+      } catch (error) {
+        throw httpError(502, `${provider} 模型检测失败，未切换：${safeModelError(error)}`);
+      }
+      const saved = await queueModelConfigWrite(async () => {
+        assertCurrentModelMutation(operationGeneration);
+        const result = await setActiveProvider({ root, provider });
+        assertCurrentModelMutation(operationGeneration);
+        return result;
+      });
+      modelRuntimeGeneration += 1;
+      modelRuntimeStatus = { provider, model: profile.model, state: "available", error: null };
+      return ok(req, res, modelConfigPayload(saved));
+    }
+
+    if (req.method === "POST" && path === "/admin/api/model/test-save") {
+      await modelConfigWriteTail;
+      const operationGeneration = ++modelConfigMutationGeneration;
+      const body = await readJson(req);
+      const current = await readModelConfig({ root });
+      const provider = String(body.provider ?? "").trim();
+      const previous = current.profiles[provider];
+      if (!previous) throw httpError(400, "provider 只能是 deepseek 或 local");
+      const candidate = {
+        provider,
+        baseUrl: body.baseUrl ?? previous.baseUrl,
+        model: body.model ?? previous.model,
+        authMode: body.authMode ?? previous.authMode,
+        apiKey: body.apiKey === undefined ? previous.apiKey : String(body.apiKey).trim(),
+      };
+      let call;
+      try {
+        call = buildModelProbeCall(candidate);
+      } catch (error) {
+        throw httpError(400, safeModelError(error));
+      }
+      try {
+        await executeModelProbe(call);
+      } catch (error) {
+        throw httpError(502, `${provider} 连通性测试失败，原配置已保留：${safeModelError(error)}`);
+      }
+      try {
+        const saved = await queueModelConfigWrite(async () => {
+          assertCurrentModelMutation(operationGeneration);
+          const result = await writeModelProfile({ root, provider, profile: candidate });
+          assertCurrentModelMutation(operationGeneration);
+          return result;
+        });
+        return ok(req, res, { connected: true, provider, config: modelConfigPayload(saved) });
+      } catch (error) {
+        if (error.status === 409) throw error;
         throw httpError(400, safeModelError(error));
       }
     }
@@ -2221,30 +3570,15 @@ export async function createOliviaService(options = {}) {
       if (!profile) throw httpError(400, "provider 只能是 deepseek 或 local");
       let call;
       try {
-        call = buildChatRequest(profile, {
-          messages: [{ role: "user", content: "测试" }],
-          maxTokens: 1,
-        });
+        call = buildModelProbeCall(profile);
       } catch (error) {
         throw httpError(400, safeModelError(error));
       }
-      call.body.stream = false;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
       try {
-        const response = await request(call.url, {
-          method: "POST",
-          headers: call.headers,
-          body: JSON.stringify(call.body),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        await response.json();
+        await executeModelProbe(call);
         return ok(req, res, { connected: true, provider });
       } catch (error) {
         throw httpError(502, `${provider} 连通性测试失败：${safeModelError(error)}`);
-      } finally {
-        clearTimeout(timer);
       }
     }
 
@@ -2254,24 +3588,32 @@ export async function createOliviaService(options = {}) {
     }
 
     if (req.method === "POST" && path === "/admin/api/deepseek") {
+      await modelConfigWriteTail;
+      const operationGeneration = ++modelConfigMutationGeneration;
       const body = await readJson(req);
       const config = await readModelConfig({ root });
       const previous = config.profiles.deepseek;
       const custom = body.custom === true;
       const apiKey = String(body.apiKey ?? "").trim() || previous.apiKey;
       try {
-        const saved = await writeModelProfile({
-          root,
-          provider: "deepseek",
-          profile: {
-            apiKey,
-            authMode: "bearer",
-            model: custom ? String(body.model ?? "").trim() : DEFAULT_DEEPSEEK_PROFILE.model,
-            baseUrl: custom ? String(body.baseUrl ?? "").trim() : DEFAULT_DEEPSEEK_PROFILE.baseUrl,
-          },
+        const saved = await queueModelConfigWrite(async () => {
+          assertCurrentModelMutation(operationGeneration);
+          const result = await writeModelProfile({
+            root,
+            provider: "deepseek",
+            profile: {
+              apiKey,
+              authMode: "bearer",
+              model: custom ? String(body.model ?? "").trim() : DEFAULT_DEEPSEEK_PROFILE.model,
+              baseUrl: custom ? String(body.baseUrl ?? "").trim() : DEFAULT_DEEPSEEK_PROFILE.baseUrl,
+            },
+          });
+          assertCurrentModelMutation(operationGeneration);
+          return result;
         });
         return ok(req, res, legacyDeepSeekPayload(saved.profiles.deepseek));
       } catch (error) {
+        if (error.status === 409) throw error;
         throw httpError(400, safeModelError(error));
       }
     }
@@ -2515,6 +3857,96 @@ export async function createOliviaService(options = {}) {
       return ok(req, res, rows.map(row => ({ ...visibleLetter(row, req), error: row.error, memoryError: row.memory_error, person: row.person })));
     }
 
+    if (req.method === "GET" && path === "/admin/api/midi") {
+      const libraryRoot = getSetting(MIDI_LIBRARY_ROOT_SETTING) ?? "";
+      return ok(req, res, {
+        dataRoot: libraryRoot || (options.officialMediaRoot
+          ? resolve(options.officialMediaRoot)
+          : storageStatus.activePath ? storageDirectories(storageStatus.activePath).performances : ""),
+        songs: midiStore.listPublishedUserSongs(),
+        total: midiStore.pagePublishedUserSongs({ pageSize: 1 }).total,
+        revision: midiStore.libraryRevision(),
+        queue: {
+          activeJobId: midiQueue.active?.id ?? null,
+          pendingCount: midiQueue.pendingCount ?? 0,
+        },
+        library: {
+          root: libraryRoot,
+          mode: "reference",
+          syncing: Boolean(midiLibrarySyncPromise),
+        },
+      });
+    }
+
+    if (req.method === "GET" && path === "/admin/api/midi-duration-repair") {
+      return ok(req, res, midiDurationRepair.status());
+    }
+
+    if (req.method === "POST" && path === "/admin/api/midi-duration-repair/start") {
+      return ok(req, res, await midiDurationRepair.start());
+    }
+
+    if (req.method === "POST" && path === "/admin/api/midi-library/preview") {
+      const body = await readJson(req);
+      resolveSongPreview.invalidate();
+      const preview = await scanPerformanceLibrary(String(body.root ?? ""));
+      const previewId = randomUUID();
+      midiLibraryPreviews.clear();
+      midiLibraryPreviews.set(previewId, { preview, mode: "reference", createdAt: nowSeconds() });
+      return ok(req, res, {
+        previewId,
+        source: preview.source,
+        total: preview.entries.length,
+        mode: "reference",
+        warnings: preview.warnings,
+        entries: preview.entries.map(entry => ({
+          name: entry.name,
+          hasMidi: Boolean(entry.midiPath),
+          hasVideo: Boolean(entry.videoPath),
+          variantCount: Object.keys(entry.videoByTodView).length,
+          warnings: entry.warnings,
+        })),
+      });
+    }
+
+    if (req.method === "POST" && path === "/admin/api/midi-library/confirm") {
+      const body = await readJson(req);
+      const previewId = String(body.previewId ?? "");
+      const saved = midiLibraryPreviews.get(previewId);
+      if (!saved || nowSeconds() - saved.createdAt > 60 * 60)
+        throw httpError(404, "曲库预览不存在或已过期");
+      let result;
+      try {
+        result = await importPerformanceLibrary(saved.preview, {
+          store: midiStore,
+          queue: midiQueue,
+          mode: "reference",
+          managedRoot: officialMediaDirectory(),
+          probeVideoDurationUs,
+        });
+      } catch (error) {
+        if (error?.code === "LIBRARY_INSUFFICIENT_SPACE") {
+          const revision = storageRevision() + 1;
+          setSetting(STORAGE_REVISION_SETTING, revision);
+          storageStatus = {
+            ...storageStatus,
+            state: "insufficient_space",
+            requiredBytes: error.totalRequiredBytes,
+            freeBytes: error.freeBytes,
+            revision,
+            error: error.message,
+          };
+          error.status = 409;
+        }
+        throw error;
+      }
+      setSetting(MIDI_LIBRARY_ROOT_SETTING, saved.preview.root);
+      setSetting(MIDI_LIBRARY_MODE_SETTING, "reference");
+      resetMidiLibraryWatcher();
+      midiLibraryPreviews.delete(previewId);
+      return ok(req, res, result);
+    }
+
     if (req.method === "POST" && path === "/admin/api/import/preview") {
       const body = await readJson(req);
       const person = assertPerson(String(body.person ?? ""));
@@ -2561,7 +3993,7 @@ export async function createOliviaService(options = {}) {
   const server = createServer((req, res) => {
     route(req, res).catch(error => {
       const status = error.status ?? 500;
-      const responseStatus = req.url.startsWith("/toy/") ? 200 : status;
+      const responseStatus = req.url.startsWith("/toy/") && !error.mediaResponse ? 200 : status;
       if (req.url.startsWith("/toy/letter/"))
         console.error(`[letter-error] ${req.method} ${req.url} code=${error.code ?? -1} message=${error.message}`);
       if (req.url.includes("/toy/addToPlaylist") || req.url.includes("/toy/delFromPlaylist") || req.url.includes("/toy/searchPlaylist"))
@@ -2577,6 +4009,10 @@ export async function createOliviaService(options = {}) {
   wakeWorker();
   return {
     db,
+    midiStore,
+    midiPipeline: null,
+    midiQueue,
+    midiDurationRepair,
     server,
     STATUS,
     drainWorker,
@@ -2585,12 +4021,44 @@ export async function createOliviaService(options = {}) {
         server.once("error", reject);
         server.listen(port, host, resolvePromise);
       });
+      songNameCorrections.start();
+      if (options.deferStorageRefresh === true && usersettingsPath) {
+        void refreshStorageStatus().catch(error => {
+          console.error(`[storage-startup-refresh] ${error instanceof Error ? error.message : error}`);
+        });
+      }
+      void midiDurationRepair.start().catch(error => {
+        console.error(`[midi-duration-repair] ${error instanceof Error ? error.message : error}`);
+      });
+      void syncSavedMidiLibrary().catch(error => {
+        console.error(`[midi-library-sync] ${error instanceof Error ? error.message : error}`);
+      });
+      resetMidiLibraryWatcher();
+      scheduleMidiLibrarySync();
+      void detectActiveModel().catch(error => {
+        console.error(`[model-startup-detect] ${safeModelError(error)}`);
+      });
+      if (usersettingsPath && !storagePollTimer) {
+        const interval = Math.max(250, Number(options.storagePollIntervalMs) || 2000);
+        storagePollTimer = setInterval(() => {
+          void refreshStorageStatus().catch(error => {
+            console.error(`[storage-refresh] ${error instanceof Error ? error.message : error}`);
+          });
+        }, interval);
+        storagePollTimer.unref?.();
+      }
       return server.address();
     },
     async close() {
       closing = true;
+      const nameCorrectionsClosed = songNameCorrections.close();
+      const previewSourcesClosed = resolveSongPreview.close?.();
       clearTimeout(workerTimer);
       clearTimeout(memoryRetryTimer);
+      clearTimeout(midiLibrarySyncTimer);
+      clearInterval(storagePollTimer);
+      midiLibraryWatcher?.close();
+      midiLibraryWatcher = null;
       for (const job of memoryJobs.values()) {
         job.cancelled = true;
         job.child?.kill();
@@ -2598,9 +4066,15 @@ export async function createOliviaService(options = {}) {
       await Promise.all([...memoryJobs.values()].map(job => job.promise));
       await transcriptionJobs.close();
       await remoteMemoryJobs.close();
+      await midiQueue.close?.();
+      if (storageRefreshPromise) await storageRefreshPromise.catch(() => {});
+      if (midiLibrarySyncPromise) await midiLibrarySyncPromise.catch(() => {});
+      midiLibraryPreviews.clear();
       for (const path of uploadedTranscriptionFiles.values()) await rm(path, { force: true });
       if (workerPromise) await workerPromise;
       if (server.listening) await new Promise(resolvePromise => server.close(resolvePromise));
+      await nameCorrectionsClosed;
+      await previewSourcesClosed;
       db.close();
     },
   };

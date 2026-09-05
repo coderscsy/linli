@@ -1,7 +1,8 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { DesktopController } from "./controller.js";
+import { prepareWorkspaceIncrementally } from "./workspace-template.js";
 
 const PREFIX = "OLIVIA\t";
 
@@ -15,54 +16,30 @@ function send(message) {
   process.stdout.write(`${PREFIX}${JSON.stringify(message)}\n`);
 }
 
-async function copyIfPresent(source, destination) {
-  try {
-    await cp(source, destination, { recursive: true, force: true });
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-}
-
-async function prepareWorkspace(template, root) {
-  await mkdir(root, { recursive: true });
-  await Promise.all([
-    copyIfPresent(join(template, ".cursor", "skills"), join(root, ".cursor", "skills")),
-    copyIfPresent(join(template, "harness"), join(root, "harness")),
-    copyIfPresent(join(template, "tools"), join(root, "tools")),
-    copyIfPresent(join(template, "林离人设.md"), join(root, "林离人设.md")),
-  ]);
-  await Promise.all([
-    rm(join(root, ".cursor", "rules"), { recursive: true, force: true }),
-    rm(join(root, "harness", "00-strict-precheck.md"), { force: true }),
-    rm(join(root, "harness", "00-脚本算术.md"), { force: true }),
-    rm(join(root, "harness", "02-读信感.md"), { force: true }),
-    rm(join(root, "harness", "06-实时回信.md"), { force: true }),
-  ]);
-  await Promise.all([
-    mkdir(join(root, "信件往来"), { recursive: true }),
-    mkdir(join(root, "信件往来_原始语料"), { recursive: true }),
-  ]);
-}
-
+const startupStartedAt = Date.now();
 const root = argument("--root");
 const dataDir = argument("--data-dir");
 const template = argument("--template");
 const appData = argument("--app-data");
+const usersettingsPath = argument("--usersettings");
 const executable = argument("--executable");
 const parentPid = Number(argument("--parent-pid"));
 if (!Number.isInteger(parentPid) || parentPid < 1) throw new Error("父进程 PID 无效");
 await mkdir(appData, { recursive: true });
 await mkdir(dataDir, { recursive: true });
-await prepareWorkspace(template, root);
+const workspace = await prepareWorkspaceIncrementally({ template, root, settings: join(appData, "settings") });
+console.log(`startup-stage=workspace-prepared elapsedMs=${Date.now() - startupStartedAt} changed=${workspace.changed}`);
 
 const controller = new DesktopController({
   root,
   dataDir,
   appData,
+  usersettingsPath,
   executable,
   onPortChanged: port => send({ type: "port", port }),
 });
 const port = await controller.initialize();
+console.log(`startup-stage=service-ready elapsedMs=${Date.now() - startupStartedAt}`);
 send({ type: "ready", port });
 console.log(`[host] ready pid=${process.pid} parent=${parentPid} port=${port}`);
 
@@ -87,6 +64,7 @@ const handlers = {
   exportSoul: path => controller.exportSoul(path),
   assertRemoteSoulExport: jobId => controller.assertRemoteSoulExport(jobId),
   exportRemoteSoul: (jobId, path) => controller.exportRemoteSoul(jobId, path),
+  prepareUpdateInstall: path => controller.prepareUpdateInstall(path),
   shutdown: async () => {
     await close("desktop-command");
     return { stopped: true };

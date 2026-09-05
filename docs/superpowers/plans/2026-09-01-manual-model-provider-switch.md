@@ -57,7 +57,7 @@ Create a temporary root with `.cursor/secrets/deepseek.env`, call `readModelConf
 ```js
 assert.equal(config.activeProvider, "deepseek");
 assert.equal(config.profiles.deepseek.apiKey, "legacy-key");
-assert.equal(config.profiles.local.model, "gemma-4-26b-a4b-it-ultra-uncensored-heretic");
+assert.equal(config.profiles.local.model, "local-model");
 assert.deepEqual(after.profiles.deepseek, before.profiles.deepseek);
 assert.deepEqual(await readFile(legacyPath), legacyBytes);
 ```

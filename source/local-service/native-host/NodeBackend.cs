@@ -25,6 +25,8 @@ namespace OliviaSoul
         private Process _process;
         private IntPtr _job;
         private int _disposed;
+        private readonly object _stopLock = new object();
+        private Task _stopTask;
 
         public int Port { get; private set; }
         public event Action<int> PortChanged;
@@ -53,6 +55,7 @@ namespace OliviaSoul
                         "--data-dir", Quote(_paths.Data),
                         "--template", Quote(_paths.Template),
                         "--app-data", Quote(_paths.UserData),
+                        "--usersettings", Quote(_paths.GameUserSettings),
                         "--executable", Quote(Application.ExecutablePath),
                         "--parent-pid", Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture),
                     }),
@@ -181,7 +184,16 @@ namespace OliviaSoul
             return await completion.Task.ConfigureAwait(false);
         }
 
-        public async Task StopAsync()
+        public Task StopAsync()
+        {
+            lock (_stopLock)
+            {
+                if (_stopTask == null) _stopTask = StopCoreAsync();
+                return _stopTask;
+            }
+        }
+
+        private async Task StopCoreAsync()
         {
             if (_process == null || _process.HasExited) return;
             RaiseLog("node graceful stop pid=" + _process.Id.ToString(CultureInfo.InvariantCulture));

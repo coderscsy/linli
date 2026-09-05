@@ -18,3 +18,10 @@ Thumbs.db
 .worktrees/
 release/*.exe
 release/*.zip
+**/MidiRenderer/
+source/midi-renderer/runtime/
+source/midi-renderer/generated/
+**/_build/
+**/.superpowers/
+**/UserData/
+**/client-backups/

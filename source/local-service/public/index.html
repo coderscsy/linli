@@ -24,8 +24,12 @@
         <div class="sideTitle">管理</div>
         <nav class="sideTabs" aria-label="管理页签">
           <button class="sideTab active" type="button" data-tab="settings">基础设置</button>
+          <button class="sideTab" type="button" data-tab="ai">AI 模型</button>
+          <button class="sideTab" type="button" data-tab="desktop">客户端与桌面</button>
+          <button class="sideTab" type="button" data-tab="performances">官方作品</button>
           <button class="sideTab" type="button" data-tab="memory">记忆</button>
           <button class="sideTab" type="button" data-tab="transcription">视频转文字</button>
+          <button class="sideTab" type="button" data-tab="update">软件更新</button>
           <button class="sideTab" type="button" data-tab="debug">高级设置</button>
         </nav>
       </aside>
@@ -35,7 +39,7 @@
           <div class="panelHead">
             <div>
               <h2>基础设置</h2>
-              <p>配置客户端身份、模型与本机服务</p>
+              <p>配置离线身份并查看本机服务状态</p>
             </div>
           </div>
           <section id="statusCards" class="cards basicStatus"></section>
@@ -55,6 +59,15 @@
             </div>
             <p id="identityResult" class="result autoSaveResult"></p>
           </section>
+        </section>
+
+        <section class="panel tabPage" data-page="ai" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>AI 模型</h2>
+              <p>配置远程或本地兼容 API；保存、检测和启用相互独立</p>
+            </div>
+          </div>
           <section class="settingsBlock">
             <div class="settingsBlockHead modelSettingsHead">
               <div>
@@ -63,24 +76,33 @@
               </div>
               <span id="activeModelProvider" class="activeProvider">当前：读取中</span>
             </div>
-            <div class="providerSwitch">
-              <div>
-                <label for="modelProvider">编辑模型档案</label>
-                <select id="modelProvider">
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="local">本地 Gemma</option>
-                </select>
+            <div class="settingsSubcard currentModelCard">
+              <div class="providerSwitch">
+                <div>
+                  <label for="modelProvider">编辑模型档案</label>
+                  <select id="modelProvider">
+                    <option value="deepseek">远程兼容 API</option>
+                    <option value="local">本地兼容 API</option>
+                  </select>
+                </div>
+                <button id="activateModelProvider" type="button">检测并设为当前模型</button>
               </div>
-              <button id="activateModelProvider" type="button">设为当前模型</button>
+              <p class="providerHint">切换编辑项不会改变当前模型；只有配置完整且实际检测成功后才会切换。</p>
+              <div class="actions">
+                <button id="detectActiveModel" class="secondary" type="button">重新检测当前模型</button>
+              </div>
             </div>
-            <p class="providerHint">切换编辑项不会改变当前模型；只有点击“设为当前模型”才会切换。</p>
 
-            <div class="modelProfile" data-model-profile="deepseek">
+            <div class="settingsSubcard modelProfile" data-model-profile="deepseek">
+              <div class="settingsSubcardHead">
+                <strong>远程兼容 API</strong>
+                <small>支持 OpenAI-compatible Models 与 Chat Completions</small>
+              </div>
               <div class="modelSettings">
                 <div>
-                  <label for="apiKey">DeepSeek API Key</label>
+                  <label for="apiKey">远程 API Key</label>
                   <div class="secretInput">
-                    <input id="apiKey" type="password" autocomplete="off" placeholder="填写 DeepSeek API Key">
+                    <input id="apiKey" type="password" autocomplete="off" placeholder="填写远程接口 API Key">
                     <button id="toggleApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
@@ -97,7 +119,9 @@
                 <div id="customFields" class="customFields" hidden>
                   <div>
                     <label for="modelName">模型名</label>
-                    <input id="modelName" placeholder="deepseek-v4-pro">
+                    <select id="modelName">
+                      <option value="" disabled selected>请先查询模型</option>
+                    </select>
                   </div>
                   <div>
                     <label for="modelBaseUrl">地址</label>
@@ -106,16 +130,23 @@
                 </div>
               </div>
               <div class="actions">
-                <button id="testDeepSeek" class="secondary" type="button">保存并测试 DeepSeek</button>
+                <button id="queryRemoteModels" class="secondary" type="button">查询模型列表</button>
+                <button id="testDeepSeek" class="secondary" type="button">保存并测试远程模型</button>
                 <span id="deepSeekResult" class="result"></span>
               </div>
             </div>
 
-            <div class="modelProfile" data-model-profile="local" hidden>
+            <div class="settingsSubcard modelProfile" data-model-profile="local" hidden>
+              <div class="settingsSubcardHead">
+                <strong>本地兼容 API</strong>
+                <small>连接已经运行的 OpenAI-compatible 本地服务</small>
+              </div>
               <div class="modelSettings localModelFields">
                 <div>
                   <label for="localModelName">模型名</label>
-                  <input id="localModelName" value="gemma-4-26b-a4b-it-ultra-uncensored-heretic" placeholder="gemma-4-26b-a4b-it-ultra-uncensored-heretic">
+                  <select id="localModelName">
+                    <option value="" disabled selected>请先查询模型</option>
+                  </select>
                 </div>
                 <div>
                   <label for="localModelBaseUrl">地址</label>
@@ -143,11 +174,32 @@
                 </div>
               </div>
               <div class="actions">
-                <button id="testLocalModel" class="secondary" type="button">保存并测试本地 Gemma</button>
+                <button id="queryLocalModels" class="secondary" type="button">查询模型列表</button>
+                <button id="testLocalModel" class="secondary" type="button">保存并测试本地模型</button>
                 <span id="localModelResult" class="result"></span>
               </div>
             </div>
+
+            <div class="settingsSubcard">
+              <div class="settingsSubcardHead">
+                <strong>重置模型配置</strong>
+                <small>仅清除已保存的模型、接口与 API Key，不会删除信件、数据库、曲库或媒体</small>
+              </div>
+              <div class="actions">
+                <button id="resetModelConfig" class="secondary" type="button">清除模型配置</button>
+                <span id="resetModelResult" class="result"></span>
+              </div>
+            </div>
           </section>
+        </section>
+
+        <section class="panel tabPage" data-page="desktop" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>客户端与桌面</h2>
+              <p>管理游戏客户端、本地服务、托盘与开机行为</p>
+            </div>
+          </div>
           <section id="serviceMountSettings" class="serviceMountSettings" hidden>
             <div class="serviceMountHead">
               <div>
@@ -175,7 +227,7 @@
               <span id="serviceMountResult" class="result"></span>
             </div>
           </section>
-          <section id="desktopSettings" class="appSettings" hidden>
+          <section id="desktopSettings" class="appSettings desktopSection" hidden>
             <div>
               <strong>桌面应用</strong>
               <small>关闭或最小化窗口后，服务会继续在系统托盘运行</small>
@@ -188,6 +240,116 @@
                 <path d="M12 6.2v11.4M7.9 8h8.2"></path>
               </svg>
             </label>
+          </section>
+          <section class="settingsBlock storageSection">
+            <div class="settingsBlockHead">
+              <strong>数据与曲目保存位置</strong>
+              <small id="storageState">正在读取游戏设置</small>
+            </div>
+            <dl class="storageStatusGrid">
+              <div class="storagePathDisclosureRow">
+                <dt>本机路径</dt>
+                <dd>
+                  <details id="storagePathDetails" class="storagePathDetails">
+                    <summary>查看本机路径</summary>
+                    <ul class="storagePathValues">
+                      <li><span>游戏配置路径</span><strong id="storageConfiguredPath" title="">尚未读取</strong></li>
+                      <li><span>最后有效路径</span><strong id="storageActivePath" title="">尚未读取</strong></li>
+                      <li><span>明确迁移后的保存位置</span><strong id="storageManagedPath" title="">尚未读取</strong></li>
+                    </ul>
+                  </details>
+                </dd>
+              </div>
+              <div class="storageReferenceRow">
+                <dt>作品当前引用位置</dt>
+                <dd>
+                  <details id="storageReferencedDetails" class="storageReferenceDetails">
+                    <summary id="storageReferenceSummary">尚未读取</summary>
+                    <div id="storageReferencedRoots">当前数据库没有外部作品引用</div>
+                  </details>
+                </dd>
+              </div>
+              <div><dt>迁移预览</dt><dd id="storageSpace">尚未预览；不会自动迁移</dd></div>
+            </dl>
+            <div class="taskProgress storageMigrationProgress" id="storageMigrationProgress" data-state="idle" hidden>
+              <div><span id="storageMigrationStage">等待开始预览</span><strong id="storageMigrationPercent">0%</strong></div>
+              <span class="taskProgressTrack"><span></span></span>
+            </div>
+            <div class="actions">
+              <button id="refreshStorage" class="secondary" type="button">重新读取路径</button>
+              <button id="previewStorageMigration" class="secondary" type="button">预览迁移</button>
+              <button id="cancelStorageMigrationPreview" class="secondary danger" type="button" hidden>取消预览</button>
+              <button id="confirmStorageMigration" type="button" disabled>确认迁移</button>
+              <span id="storageError" class="result"></span>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel tabPage" data-page="update" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>软件更新</h2>
+              <p>仅访问公开 GitHub Release，不上传本地配置、信件或密钥</p>
+            </div>
+          </div>
+          <section id="updateSettings" class="settingsBlock">
+            <div class="settingsBlockHead">
+              <strong>软件更新</strong>
+              <small id="updateVersion">手动检查 GitHub Release，不会上传本地配置或密钥</small>
+            </div>
+            <div class="actions">
+              <button id="checkUpdate" class="secondary" type="button">检查更新</button>
+              <button id="downloadUpdate" type="button" hidden>下载并安装更新</button>
+              <span id="updateResult" class="result"></span>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel tabPage performancePage" data-page="performances" hidden>
+          <div class="panelHead">
+            <div>
+              <h2>官方作品</h2>
+              <p>把已下载的官方或用户完整演奏视频导入“我的上传”</p>
+            </div>
+          </div>
+
+          <section class="settingsBlock">
+            <div class="settingsBlockHead">
+              <strong>导入本地曲库</strong>
+              <small>每首作品至少包含一个可播放的 MP4 官方成品；只有 MIDI 时会明确跳过，不创建空作品</small>
+            </div>
+            <div class="libraryPathRow">
+              <div>
+                <label for="midiLibraryRoot">曲库文件夹</label>
+                <input id="midiLibraryRoot" placeholder="请选择包含曲目文件的文件夹">
+              </div>
+              <button id="selectMidiLibrary" class="secondary" type="button">选择文件夹</button>
+              <button id="openMidiLibraryFolder" class="secondary" type="button">打开路径</button>
+              <p class="fieldHint">默认引用所选目录，不自动搬动视频；导入后请保留源文件。需要迁移时，请到“客户端与桌面”预览并确认。</p>
+            </div>
+            <div class="actions">
+              <button id="previewMidiLibrary" class="secondary" type="button">扫描预览</button>
+              <button id="confirmMidiLibrary" type="button" disabled>确认导入</button>
+              <span id="midiLibraryResult" class="result"></span>
+            </div>
+            <div id="midiLibraryPreview" class="libraryPreview empty">尚未扫描曲库。</div>
+          </section>
+
+          <section class="settingsBlock">
+            <div class="settingsBlockHead performanceStatusHead">
+              <strong class="performanceTitle">我的上传</strong>
+              <div class="performanceTools">
+                <input id="midiSongSearch" type="search" placeholder="搜索我的上传">
+                <button id="refreshMidiStatus" class="secondary compact" type="button">刷新</button>
+              </div>
+            </div>
+            <small id="midiDataRoot" class="performancePath" title="正在读取数据目录">正在读取数据目录</small>
+            <div class="performanceColumns">
+              <div>
+                <h3>曲目</h3>
+                <div id="midiSongList" class="performanceList"><p class="empty">还没有本地曲目。</p></div>
+              </div>
+            </div>
           </section>
         </section>
 
@@ -266,7 +428,7 @@
               <p>本地 Whisper 逐字转写，再由当前启用的模型只做错字、标点和分段整理</p>
             </div>
           </div>
-          <section class="taskCard">
+          <section class="taskCard transcriptionCard">
             <div class="mediaPicker">
               <button id="selectTranscriptionMedia" class="secondary" type="button">选择视频或音频</button>
               <span id="transcriptionFileName">尚未选择文件</span>
@@ -284,17 +446,17 @@
               <div><span id="transcriptionModelStage">等待下载模型</span><strong id="transcriptionModelPercent">0%</strong></div>
               <span class="taskProgressTrack"><span></span></span>
             </div>
+            <div class="transcriptGrid">
+              <section>
+                <label for="rawTranscript">原始转写</label>
+                <textarea id="rawTranscript" readonly placeholder="完成后显示 Whisper 原始转写"></textarea>
+              </section>
+              <section>
+                <label for="organizedTranscript">整理文字</label>
+                <textarea id="organizedTranscript" readonly placeholder="完成后显示当前模型整理的文字"></textarea>
+              </section>
+            </div>
           </section>
-          <div class="transcriptGrid">
-            <section>
-              <label for="rawTranscript">原始转写</label>
-              <textarea id="rawTranscript" readonly placeholder="完成后显示 Whisper 原始转写"></textarea>
-            </section>
-            <section>
-              <label for="organizedTranscript">整理文字</label>
-              <textarea id="organizedTranscript" readonly placeholder="完成后显示当前模型整理的文字"></textarea>
-            </section>
-          </div>
         </section>
 
         <section class="panel tabPage debugPage" data-page="debug" hidden>
@@ -329,12 +491,12 @@
               </div>
             </section>
             <section class="debugCard quotaReset">
-              <div>
-                <strong>今日信件次数</strong>
-                <small id="debugQuotaStatus">正在读取</small>
+              <div class="quotaSummary">
+                <strong>今日信件</strong>
+                <span id="debugQuotaStatus">正在读取</span>
               </div>
-              <div>
-                <label for="debugDailyLetterLimit">每日上限（0 表示不限）</label>
+              <div class="quotaLimit">
+                <label for="debugDailyLetterLimit">每日上限</label>
                 <input id="debugDailyLetterLimit" type="number" min="0" max="999" step="1">
               </div>
               <div class="actions">
@@ -361,6 +523,7 @@
       </div>
     </section>
   </div>
+  <script src="/admin/song-editor.js"></script>
   <script type="module" src="/admin/app.js"></script>
 </body>
 </html>

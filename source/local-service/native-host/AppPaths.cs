@@ -12,6 +12,7 @@ namespace OliviaSoul
         public string Template { get; private set; }
         public string NodeExecutable { get; private set; }
         public string NodeHostScript { get; private set; }
+        public string GameUserSettings { get; private set; }
 
         public static AppPaths Detect()
         {
@@ -19,14 +20,16 @@ namespace OliviaSoul
             var packaged = File.Exists(Path.Combine(baseDirectory, "runtime", "node.exe"));
             var localService = packaged ? null : Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", ".."));
             var repositoryRoot = packaged ? null : Path.GetFullPath(Path.Combine(localService, ".."));
-            var userData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OliviaSoul");
+            var roamingData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var userData = Path.Combine(baseDirectory, "UserData");
             Directory.CreateDirectory(userData);
+            Directory.CreateDirectory(Path.Combine(userData, "database"));
             return new AppPaths
             {
                 BaseDirectory = baseDirectory,
                 UserData = userData,
-                Workspace = Path.Combine(userData, "workspace"),
-                Data = Path.Combine(userData, "data"),
+                Workspace = userData,
+                Data = Path.Combine(userData, "database"),
                 Template = packaged
                     ? Path.Combine(baseDirectory, "resources", "workspace-template")
                     : repositoryRoot,
@@ -34,6 +37,7 @@ namespace OliviaSoul
                 NodeHostScript = packaged
                     ? Path.Combine(baseDirectory, "app", "desktop", "node-host.js")
                     : Path.Combine(localService, "desktop", "node-host.js"),
+                GameUserSettings = Path.Combine(roamingData, "miHoYo", "Olivia-steam", "store", "usersettings.dat"),
             };
         }
     }
