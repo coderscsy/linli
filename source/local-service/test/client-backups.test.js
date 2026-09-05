@@ -310,10 +310,10 @@ test('inline locale identity permits exactly the known eleven FE edits', async (
   assert.deepEqual(await readFile(result.feapp), f.original);
   assert.deepEqual(await readFile(result.webplayer), zip('player()'));
 });
-test('inline locale identity permits the current v31 FE after mount registration', async () => {
-  const f = await inlineLocaleFixture({ revision: 'v31', markerRevision: 'v31' });
+test('inline locale identity permits the current v32 FE after mount registration', async () => {
+  const f = await inlineLocaleFixture({ revision: 'v32', markerRevision: 'v32' });
   f.readFeappStatus = async path => path === f.layout.feappPath
-    ? { clientFound: true, mounted: true, managed: true, updateAvailable: false, revision: 'v31', port: 27149 }
+    ? { clientFound: true, mounted: true, managed: true, updateAvailable: false, revision: 'v32', port: 27149 }
     : { clientFound: true, mounted: false, managed: false, updateAvailable: false, revision: null, port: null };
   const result = await resolver(f);
   assert.deepEqual(await readFile(result.feapp), f.original);

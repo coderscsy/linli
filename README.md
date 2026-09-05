@@ -4,14 +4,21 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## R10 下载与文档
+## R10.1 下载与文档
 
 - 软件版本：`2008.2.7`。
-- 发布标识：**R10 / `2008.2.7-linli.2`**，日期 `2026-09-05`。程序版本固定为 `2008.2.7`，请同时核对 Release 标签。
-- [R10 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.2) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.2/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.2/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.2/SHA256SUMS.txt)。
+- 发布标识：**R10.1 / `2008.2.7-linli.3`**，日期 `2026-09-05`。程序版本固定为 `2008.2.7`，请同时核对 Release 标签。
+- [R10.1 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.3) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.3/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.3/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.3/SHA256SUMS.txt)。
 - Windows x64；未配置代码签名，系统可能显示“未知发布者”。请核对下载来源与哈希，不要关闭安全软件。
 
-### R10 重点更新
+### R10.1 压力测试修复
+
+- 修复本地作品自动切到较短的官方歌曲时，旧进度变成拖动指令、直接跳到结尾而反复切歌的问题；单曲重播同样从零开始。
+- 同一播放会话的结束通知去重；状态查询一次只保留一个请求，超时取消，无本地会话时不继续查询。
+- FE 补丁升级到 v32，同时保留备份验证、停用与卸载恢复能力；不改变循环模式、曲名/时段绑定和暂停回默认壁纸逻辑。
+- **闪退边界：**压力测试中另捕获到 Chromium 内存分配失败（`0xE0000008`）。尚未确认内存压力来源，本版不宣称所有内存闪退已解决。请勿通过删除数据或关闭安全软件处理。
+
+### 保留 R10 重点功能
 
 - 恢复游戏角色旁的**写信、音乐小组件**及信箱入口；补齐 `0.0.9.627` 客户端原生隐藏判断的修复，只有网页补丁时不再误报完整挂载。
 - 修复用户上传作品的媒体绑定、播单自动切换约 2 秒中断、播放进度和结束状态；暂停/停止恢复默认壁纸。

@@ -55,7 +55,7 @@ function fixture() {
 }
 
 test("627 mount includes the native widget gates on clean installs and current v31 repairs", async () => {
-  for (const revision of [null, "v31"]) {
+  for (const revision of [null, "v31", "v32"]) {
     const ctx = fixture();
     ctx.layout.version = "0.0.9.627";
     ctx.controller.readNativeWidgetStatus = async () => ({ required: true, ready: true });

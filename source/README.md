@@ -1,6 +1,6 @@
 # 工程源码
 
-本目录保留生成 R10（Release：2008.2.7-linli.2，程序版本：2008.2.7）所需的源码快照。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
+本目录保留生成 R10.1（Release：2008.2.7-linli.3，程序版本：2008.2.7）所需的源码快照。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
 
 ```text
 source/

@@ -61,7 +61,7 @@ try {
       $text=[Text.Encoding]::UTF8.GetString($content);
       [ordered]@{
         name=$entry.FullName; hash=([BitConverter]::ToString($sha.ComputeHash($content))).Replace('-','').ToLowerInvariant(); patched=$text.Contains('OliviaSoulPatch');
-        knownFeLocalePatch=($entry.FullName -match '^assets/main-[^/]+[.]js$' -and ($text.StartsWith('/*OliviaSoulPatch:mail-music-v29*/') -or $text.StartsWith('/*OliviaSoulPatch:mail-music-v30*/') -or $text.StartsWith('/*OliviaSoulPatch:mail-music-v31*/')));
+        knownFeLocalePatch=($entry.FullName -match '^assets/main-[^/]+[.]js$' -and ($text.StartsWith('/*OliviaSoulPatch:mail-music-v29*/') -or $text.StartsWith('/*OliviaSoulPatch:mail-music-v30*/') -or $text.StartsWith('/*OliviaSoulPatch:mail-music-v31*/') -or $text.StartsWith('/*OliviaSoulPatch:mail-music-v32*/')));
         localeBase64=if($entry.FullName -match '^assets/zh-cn-[^/]+[.]js$' -and $content.Length -le 1048576){[Convert]::ToBase64String($content)}else{$null}
       }
     } finally { $entryStream.Dispose(); $out.Dispose() }
@@ -245,7 +245,7 @@ export async function resolveClientBackups({ layout, dataDir, appData, roamingAp
       const status = await readFeappStatus(layout.feappPath);
       knownFeLocale = currentFe.knownFeLocalePatch && status.clientFound === true && status.managed === true
         && (status.mounted === true || status.updateAvailable === true)
-        && ['v29', 'v30', 'v31'].includes(status.revision);
+        && ['v29', 'v30', 'v31', 'v32'].includes(status.revision);
     }
     return sameIdentity(original, currentFe, knownFeLocale);
   }

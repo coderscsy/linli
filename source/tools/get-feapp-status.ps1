@@ -63,9 +63,10 @@ foreach ($endpoint in $endpoints) {
     $ports.Add([int]$matches[0].Groups[1].Value)
 }
 $uniquePorts = @($ports | Select-Object -Unique)
-$currentMarker = '/*OliviaSoulPatch:mail-music-v31*/'
+$currentMarker = '/*OliviaSoulPatch:mail-music-v32*/'
 $knownMarkers = @(
     $currentMarker,
+    '/*OliviaSoulPatch:mail-music-v31*/',
     '/*OliviaSoulPatch:mail-music-v30*/',
     '/*OliviaSoulPatch:mail-music-v29*/',
     '/*OliviaSoulPatch:mail-music-v28*/',

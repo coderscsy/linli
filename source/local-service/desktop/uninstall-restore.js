@@ -106,7 +106,7 @@ async function defaultValidateLegacyArchivePair({ originals, targets, statuses }
   ]);
   if (originalFe.patched || originalWp.patched || !currentFe.patched || !currentWp.patched) return false;
   return sameClientArchiveIdentity(originalFe, currentFe, {
-    allowKnownFeLocale: currentFe.knownFeLocalePatch && ["v29", "v30", "v31"].includes(statuses.feapp.revision),
+    allowKnownFeLocale: currentFe.knownFeLocalePatch && ["v29", "v30", "v31", "v32"].includes(statuses.feapp.revision),
   }) && sameClientArchiveIdentity(originalWp, currentWp);
 }
 

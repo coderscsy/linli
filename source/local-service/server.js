@@ -67,7 +67,7 @@ const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 const DEFAULT_UPDATE_REPOSITORY = "coderscsy/linli";
-const DEFAULT_UPDATE_TAG = "2008.2.7-linli.2";
+const DEFAULT_UPDATE_TAG = "2008.2.7-linli.3";
 const MAX_UPDATE_BYTES = 1024 * 1024 * 1024;
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions?/i,

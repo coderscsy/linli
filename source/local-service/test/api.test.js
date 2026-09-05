@@ -869,8 +869,8 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
     readFile(new URL("../../tools/upgrade-webplayer-v6-v7.ps1", import.meta.url), "utf8"),
     readFile(new URL("../desktop/controller.js", import.meta.url), "utf8"),
   ]);
-  assert.match(patchScript, /OliviaSoulPatch:mail-music-v31/u);
-  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patchScript, /OliviaSoulPatch:mail-music-v32/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v32/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v25/u);
@@ -1013,9 +1013,9 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
   assert.match(webplayerUpgradeScript, /__OliviaSoulPlayerCommandKey===null/u);
   assert.match(controller, /upgrade-feapp-v22-v23\.ps1/u);
   assert.match(controller, /upgrade-webplayer-v6-v7\.ps1/u);
-  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"\]\.includes\(current\.revision\)[\s\S]{0,1600}patch-feapp-local\.ps1/u,
+  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32"\]\.includes\(current\.revision\)[\s\S]{0,1600}patch-feapp-local\.ps1/u,
     "v24 through v30 upgrades must rebuild current FE from pristine backup");
-  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"\]\.includes\(current\.revision\)[\s\S]{0,2600}patch-webplayer-local\.ps1/u,
+  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32"\]\.includes\(current\.revision\)[\s\S]{0,2600}patch-webplayer-local\.ps1/u,
     "v24 through v30 upgrades must rebuild the WebPlayer when it is not current at the requested port");
   assert.match(webplayerScript, /\[string\]\$ServiceUrl/u);
   assert.doesNotMatch(patchScript, /OliviaSoulPendingUpload=b\(null\)/u);
@@ -2994,6 +2994,24 @@ test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
   }
 });
 
+test("R10.1 默认更新标识不会把当前修复包误报为待更新", async t => {
+  const calls = [];
+  const ctx = await fixture({ fetch: async url => {
+    calls.push(url);
+    return Response.json({ tag_name: "2008.2.7-linli.3", html_url: "https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.3", assets: [{
+      name: "OliviaSoul-2008.2.7-Setup.exe", size: 10, digest: `sha256:${"a".repeat(64)}`,
+      browser_download_url: "https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.3/OliviaSoul-2008.2.7-Setup.exe",
+    }] });
+  } });
+  t.after(() => ctx.close());
+  assert.equal(calls.length, 0, "启动服务不应主动检查更新");
+  const checked = await ctx.request("/admin/api/update");
+  assert.equal(checked.status, 200);
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.3");
+  assert.equal(checked.body.data.updateAvailable, false);
+  assert.equal(calls.length, 1);
+});
+
 test("检查更新从公开 GitHub Release 查询并校验下载 Setup 到 I 盘式数据目录", async t => {
   const installer = Buffer.from("setup-binary", "utf8");
   const digest = createHash("sha256").update(installer).digest("hex");
@@ -4056,8 +4074,8 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.doesNotMatch(patch, /\$listWaitingCondition|\$listWaitingReply|\$waitingCondition/u);
   assert.match(patch, /\$pollingStateTo/u);
   assert.match(patch, /\$processingIconTo/u);
-  assert.match(patch, /OliviaSoulPatch:mail-music-v31/u);
-  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v31/u);
+  assert.match(patch, /OliviaSoulPatch:mail-music-v32/u);
+  assert.match(patchStatus, /OliviaSoulPatch:mail-music-v32/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v25/u);
