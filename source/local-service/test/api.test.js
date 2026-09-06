@@ -959,7 +959,7 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
   assert.match(patchScript, /h\.value==="songlist"/u);
   assert.match(patchScript, /OliviaSoulFinishLocalPlayback\(B\)/u);
   assert.match(patchScript, /p\.value===ot\.Single&&u\.value&&a\(u\.value\)\?M\(u\.value\):U\(\)/u);
-  assert.match(webplayerScript, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
+  assert.match(webplayerScript, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
   assert.match(webplayerScript, /\/toy\/player-command/u);
   assert.match(webplayerScript, /\/toy\/player-state/u);
   assert.match(webplayerScript, /sessionId/u);
@@ -994,21 +994,21 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
     "已经释放会话的本地 timeupdate 不得作为官方播放器事件转发");
   assert.match(webplayerScript, /const p=String\(e\.target\.currentSrc\|\|e\.target\.src\|\|""\);[\s\S]{0,900}if\(p\.includes\("\/toy\/midi\/songs\/"\)\)return/u,
     "已经释放会话的本地 ended 不得结束刚切换的官方歌曲");
-  assert.match(webplayerScript, /pe\(\{\.\.\.c\.command,__oliviaRevision:c\.revision/u,
+  assert.match(webplayerScript, /pe\(\{\.\.\.m\.command,__oliviaRevision:m\.revision/u,
     "轮询器必须把 revision 交给 play handler，并由新 video 建立后再绑定会话");
   assert.match(webplayerScript, /le\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\),window\.__OliviaSoulActivePlayerRevision=Number\(e\.__oliviaRevision\)/u,
     "同曲重播也必须在切换 video 后才绑定新会话，避免旧 ended 冒充新会话");
-  assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null\)[\s\S]{0,500}playbackState==="playing"[\s\S]{0,400}pe\(\{\.\.\.c\.command,[\s\S]{0,300}__oliviaRevision:c\.revision/u,
+  assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null\)[\s\S]{0,500}playbackState==="playing"[\s\S]{0,400}pe\(\{\.\.\.m\.command,[\s\S]{0,300}__oliviaRevision:m\.revision/u,
     "首次挂载时即使最新命令是 seek 或音量控制，也必须从 player-state 恢复正在播放的本地作品");
-  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return fetch/u,
+  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return window\.__OliviaSoulPlayerPost/u,
     "本地时间轴不得再同时发送原生和本地两套进度事件");
-  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return fetch[\s\S]{0,520}event:"ended"/u,
+  assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return window\.__OliviaSoulPlayerPost\([\s\S]{0,520}event:"ended"/u,
     "本地自然结束必须留给前端播单推进，不能先恢复默认壁纸");
   assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey/u,
     "命令去重必须使用会话键，服务重启后不能因 revision 回退而忽略新命令");
   assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null/u,
     "WebPlayer 首次挂载必须识别遗留命令而不是直接重放");
-  assert.match(webplayerScript, /S&&S\.playbackState==="playing"&&S\.commandRevision===c\.revision/u,
+  assert.match(webplayerScript, /S&&S\.playbackState==="playing"&&S\.commandRevision===m\.revision/u,
     "首次挂载必须核对实时状态，不能重播已经 ended/stopped 的旧 play 命令");
   assert.match(webplayerUpgradeScript, /webplayer-no-watermark-direct-http-progress-v6/u);
   assert.match(webplayerUpgradeScript, /webplayer-no-watermark-direct-http-progress-v7/u);
@@ -1063,7 +1063,8 @@ test("webplayer 补丁精确移除桌面 UID 水印并可从原版备份还原",
     readFile(new URL("../../tools/restore-webplayer-original.ps1", import.meta.url), "utf8"),
   ]);
   const watermark = 'S(n)?(k(),we(l,{key:0,uid:S(n)},null,8,["uid"])):Re("",!0)';
-  assert.match(patch, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
+  assert.match(patch, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v12/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v11/u);
@@ -1071,6 +1072,10 @@ test("webplayer 补丁精确移除桌面 UID 水印并可从原版备份还原",
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v9/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v8/u);
   assert.match(patch, /__OliviaSoulPlayerPoll/u);
+  assert.match(patch, /__OliviaSoulPlayerPollBusy/u);
+  assert.match(patch, /__OliviaSoulPlayerPost/u);
+  assert.match(patch, /arrayBuffer/u);
+  assert.match(patch, /,1e3\)\}\)'/u);
   assert.match(patch, /\/toy\/player-command/u);
   assert.match(patch, /\/toy\/player-state/u);
   assert.ok(patch.includes(watermark));
@@ -3055,7 +3060,7 @@ test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
   }
 });
 
-test("R10.3 默认更新标识不会把旧公开包误报为待更新", async t => {
+test("R10.4 默认更新标识不会把旧公开包误报为待更新", async t => {
   const calls = [];
   const ctx = await fixture({ fetch: async url => {
     calls.push(url);
@@ -3068,7 +3073,7 @@ test("R10.3 默认更新标识不会把旧公开包误报为待更新", async t 
   assert.equal(calls.length, 0, "启动服务不应主动检查更新");
   const checked = await ctx.request("/admin/api/update");
   assert.equal(checked.status, 200);
-  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.5");
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.6");
   assert.equal(checked.body.data.updateAvailable, false);
   assert.equal(calls.length, 1);
 });

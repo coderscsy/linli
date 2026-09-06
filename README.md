@@ -4,11 +4,16 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## R10.3 累计更新（2026-09-06）
+## R10.4 稳定性更新（2026-09-06）
 
-本次发布标识 `2008.2.7-linli.5`，程序版本仍为 `2008.2.7`，合并 R10、R10.1、R10.2 测试版及后续优化，无需逐个安装历史补丁。
+本次发布标识 `2008.2.7-linli.6`，程序版本仍为 `2008.2.7`，是包含全部历史功能的完整更新包。
 
-[R10.3 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.5) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.5/SHA256SUMS.txt)
+[R10.4 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.6) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/SHA256SUMS.txt)
+
+- WebPlayer v14 限制轮询与进度请求并释放旧请求，降低长时间播放的 CEF 内存压力。
+- 4 小时压力测试完成 952 次采样：0 错误、0 新崩溃，系统提交内存峰值 36.82%。
+- 修复新旧 WebPlayer 补丁状态误判及客户端路径识别问题。
+- 已去除 OliviaSoul 软件界面水印和游戏音乐视频画面的 UID 水印。
 
 - 下载支持系统代理、暂停/继续/取消及完整性校验；修复旧任务误续传/降级、取消提示覆盖检查结果。
 - 安装向导支持系统语言默认选择和中英文切换，统一安装与错误弹窗。
