@@ -26,6 +26,11 @@ function fixture() {
   let serviceState = {};
   let fetchFailure = false;
   let pendingStateResponse;
+  let pendingCommandResponse;
+  let intervalDelay;
+  let now = 0;
+  let commandFetches = 0;
+  let consumedBodies = 0;
   const progress = [];
   const nativeEvents = [];
   const timeouts = new Map();
@@ -41,18 +46,23 @@ function fixture() {
   const state = {};
   const context = vm.createContext({
     window: state, console: { log() {}, info() {}, warn() {} }, AbortController,
+    Date: { now: () => now },
     sessionStorage: { getItem: () => null, setItem() {} },
     i: { value: video }, l: { value: [video] }, a: { value: video.duration },
     f: null, y: null,
     ke(fn) { fn(); }, qe(fn) { nativeHandler = fn; return () => {}; }, Je() { return () => {}; }, me() {}, R() {},
-    setInterval(fn) { poll = fn; return 1; }, clearInterval() {},
+    setInterval(fn, delay) { poll = fn; intervalDelay = delay; return 1; }, clearInterval() {},
     setTimeout(fn) { const id = ++timerId; timeouts.set(id, fn); return id; }, clearTimeout(id) { timeouts.delete(id); },
     async fetch(url, options) {
       if (fetchFailure) throw new Error("service offline");
       if (options?.method === "POST") {
         const body = JSON.parse(options.body);
         progress.push(body);
-        return { ok: true, json: async () => ({ code: 0, data: {} }) };
+        return { ok: true, json: async () => ({ code: 0, data: {} }), arrayBuffer: async () => { consumedBodies += 1; return new ArrayBuffer(0); } };
+      }
+      if (url === commandUrl) {
+        commandFetches += 1;
+        if (pendingCommandResponse) return pendingCommandResponse;
       }
       if (url === stateUrl && pendingStateResponse) return pendingStateResponse;
       return { ok: true, json: async () => ({ code: 0, data: url === commandUrl ? serviceCommand : serviceState }) };
@@ -70,6 +80,7 @@ function fixture() {
     function pe(e){if(!e?.cmd)return;switch(e.cmd){${replacement("playTo")}${replacement("stopTo")}${replacement("preloadTo")}
       case "seek":K(e.offset);break;case "resume":ce();break;case "setLoop":ve(e.loop);break;}}
     ${replacement("timeUpdateTo")}
+    ${replacement("endedTo")}
     ${replacement("mountedTo")}`, context);
   return {
     video, state, progress, nativeEvents,
@@ -92,12 +103,50 @@ function fixture() {
       pendingStateResponse = new Promise(done => { resolve = done; });
       return data => resolve({ ok: true, json: async () => ({ code: 0, data }) });
     },
+    holdCommand() {
+      let resolve;
+      pendingCommandResponse = new Promise(done => { resolve = done; });
+      return data => { pendingCommandResponse = null; resolve({ ok: true, json: async () => ({ code: 0, data }) }); };
+    },
+    poll: () => poll(),
+    intervalDelay: () => intervalDelay,
+    commandFetches: () => commandFetches,
+    consumedBodies: () => consumedBodies,
+    async burstTimeUpdates(count) {
+      for (let index = 0; index < count; index += 1) await context.z({ target: video });
+    },
+    async end() { await context.q({ target: video }); },
     async advance(seconds) {
+      now += seconds * 1000;
       if (!video.paused) video.currentTime += seconds;
       await context.z({ target: video });
     },
   };
 }
+
+test("player polling is one-second and does not overlap", async () => {
+  const player = fixture();
+  assert.equal(player.intervalDelay(), 1000);
+  const respond = player.holdCommand();
+  const first = player.poll();
+  await Promise.resolve();
+  const second = player.poll();
+  assert.equal(player.commandFetches(), 1);
+  respond({ revision: 0, command: null });
+  await Promise.all([first, second]);
+});
+
+test("progress is throttled, response bodies are consumed, and ended is immediate", async () => {
+  const player = fixture();
+  await player.start();
+  await player.advance(1);
+  await player.burstTimeUpdates(8);
+  assert.equal(player.progress.filter(event => event.event === "timeupdate").length, 1);
+  assert.equal(player.consumedBodies(), 1);
+  await player.end();
+  assert.equal(player.progress.at(-1).event, "ended");
+  assert.equal(player.consumedBodies(), 2);
+});
 
 for (const command of [{ cmd: "pause" }, { cmd: "stop" }, { cmd: "play", url: wallpaper, loop: true }]) {
   test(`late native ${command.cmd}${command.url ? " wallpaper" : ""} cannot replace a playing local session`, async () => {

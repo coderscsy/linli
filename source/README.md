@@ -1,6 +1,6 @@
 # 工程源码
 
-本目录为 R10.3 累计更新源码（更新标识：2008.2.7-linli.5，程序版本：2008.2.7）。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
+本目录为 R10.4 稳定性更新源码（更新标识：2008.2.7-linli.6，程序版本：2008.2.7）。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
 
 ```text
 source/
