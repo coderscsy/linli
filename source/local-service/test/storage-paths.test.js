@@ -23,6 +23,11 @@ test("解析游戏二进制帧中的 songStoragePath 控制字节", () => {
   assert.equal(parseSongStoragePath(settings), "I:\\Music");
 });
 
+test("解析 Issue 2 中的括号字段帧", () => {
+  const settings = Buffer.from('songStoragePath)("E:\\\\Olivia-steam\\\\cache\\\\studio\\\\video")', "utf8");
+  assert.equal(parseSongStoragePath(settings), "E:\\Olivia-steam\\cache\\studio\\video");
+});
+
 test("设置文件暂时被占用时重试并使用游戏路径", async () => {
   let attempts = 0;
   const result = await resolveSongStoragePath({

@@ -4,11 +4,13 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## R10.4 稳定性更新（2026-09-06）
+## R10.5 曲目路径识别修复（2026-09-08）
 
-本次发布标识 `2008.2.7-linli.6`，程序版本仍为 `2008.2.7`，是包含全部历史功能的完整更新包。
+修复 [Issue #2](https://github.com/coderscsy/linli/issues/2)：部分游戏设置文件已有曲目目录，但软件提示“没有有效的 songStoragePath”，导致导入失败。升级后在“客户端与桌面”点击“重新读取路径”，再扫描并导入曲库。下面保留的四小时压力测试结果来自 R10.4。
 
-[R10.4 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.6) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.6/SHA256SUMS.txt)
+本次发布标识 `2008.2.7-linli.7`，程序版本仍为 `2008.2.7`，是包含全部历史功能的完整更新包。
+
+[R10.5 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.7) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/SHA256SUMS.txt)
 
 - WebPlayer v14 限制轮询与进度请求并释放旧请求，降低长时间播放的 CEF 内存压力。
 - 4 小时压力测试完成 952 次采样：0 错误、0 新崩溃，系统提交内存峰值 36.82%。

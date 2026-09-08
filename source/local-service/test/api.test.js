@@ -3060,7 +3060,7 @@ test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
   }
 });
 
-test("R10.4 默认更新标识不会把旧公开包误报为待更新", async t => {
+test("R10.5 默认更新标识不会把旧公开包误报为待更新", async t => {
   const calls = [];
   const ctx = await fixture({ fetch: async url => {
     calls.push(url);
@@ -3073,7 +3073,7 @@ test("R10.4 默认更新标识不会把旧公开包误报为待更新", async t 
   assert.equal(calls.length, 0, "启动服务不应主动检查更新");
   const checked = await ctx.request("/admin/api/update");
   assert.equal(checked.status, 200);
-  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.6");
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.7");
   assert.equal(checked.body.data.updateAvailable, false);
   assert.equal(calls.length, 1);
 });

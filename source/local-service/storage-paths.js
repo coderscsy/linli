@@ -16,7 +16,7 @@ function decodedCandidates(buffer) {
 
 export function parseSongStoragePath(buffer) {
   for (const text of decodedCandidates(buffer)) {
-    const match = /songStoragePath[\x00-\x20:=]{0,32}("(?:\\.|[^"\\])*")/u.exec(text);
+    const match = /songStoragePath[\x00-\x20:=()]{0,32}("(?:\\.|[^"\\])*")/u.exec(text);
     if (!match) continue;
     try {
       const parsed = JSON.parse(match[1]);
