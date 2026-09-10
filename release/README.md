@@ -1,8 +1,8 @@
-# linli.8 桌面歌词与曲库累计更新
+# R10.6 桌面歌词与曲库累计更新
 
 更新标识：`2008.2.7-linli.8`；程序版本：`2008.2.7`；FE v44 / WebPlayer v18；日期：2026-09-10。
 
-从 [linli.8 Release](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.8) 下载完整安装包、便携包和对应的 `SHA256SUMS.txt`。可执行文件不提交进 Git。
+从 [R10.6 Release](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.8) 下载完整安装包、便携包和对应的 `SHA256SUMS.txt`。可执行文件不提交进 Git。
 
 - 新增桌面歌词、独立设置、多版本共用 LRC/独立偏移、歌词播放控制及曲库移除。
 - 修复导入后前后台列表刷新、移除播放中作品后续播和进度异常、多目录来源与单作品多视频识别。

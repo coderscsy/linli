@@ -4,7 +4,7 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## linli.8 桌面歌词与曲库累计更新（2026-09-10）
+## R10.6 桌面歌词与曲库累计更新（2026-09-10）
 
 更新标识 **`2008.2.7-linli.8`**，程序版本保持 `2008.2.7`，客户端补丁 **FE v44 / WebPlayer v18**。安装版和便携版包含完整运行时，不需要另外安装 Node.js。
 
@@ -34,7 +34,7 @@
 
 修复 [Issue #2](https://github.com/coderscsy/linli/issues/2)：部分游戏设置文件已有曲目目录，但软件提示“没有有效的 songStoragePath”，导致导入失败。升级后在“客户端与桌面”点击“重新读取路径”，再扫描并导入曲库。下面保留的四小时压力测试结果来自 R10.4。
 
-该历史版本发布标识 `2008.2.7-linli.7`，程序版本为 `2008.2.7`，相关修复已包含在 linli.8。
+该历史版本发布标识 `2008.2.7-linli.7`，程序版本为 `2008.2.7`，相关修复已包含在 R10.6（linli.8）。
 
 [R10.5 发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.7) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.7/SHA256SUMS.txt)
 

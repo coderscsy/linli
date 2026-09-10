@@ -1,6 +1,6 @@
 # 工程源码
 
-本目录为 linli.8 桌面歌词与曲库累计更新源码（更新标识：2008.2.7-linli.8，程序版本：2008.2.7；FE v44 / WebPlayer v18）。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
+本目录为 R10.6 桌面歌词与曲库累计更新源码（更新标识：2008.2.7-linli.8，程序版本：2008.2.7；FE v44 / WebPlayer v18）。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
 
 ```text
 source/
