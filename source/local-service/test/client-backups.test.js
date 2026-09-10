@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 // Literal archive content; ZIP storage records are built independently of the resolver.
 function zip(main = 'original()', asset = 'version-one', entries = [['assets/main-build.js', main], ['assets/style.css', asset]]) {
@@ -76,6 +78,22 @@ async function stagedFixture() {
   await writeFile(pair.webplayer, zip('player()'));
   return { ...f, staged, pair };
 }
+
+test('v11 legacy route set is upgradeable with verified originals; missing or mixed routes remain rejected', async () => {
+  const f = await fixture();
+  const endpoints = ['/signIn','/getUserInfo','/letter/send','/letter/list','/letter/detail','/letter/unread_count','/letter/share','/letter/resend','/addToPlaylist','/delFromPlaylist','/searchPlaylist'];
+  const main = '/*OliviaSoulPatch:mail-music-v11*/' + endpoints.map(e => `"http://127.0.0.1:27149/toy${e}"`).join(';');
+  const status = path => JSON.parse(execFileSync('powershell.exe',['-NoProfile','-File',fileURLToPath(new URL('../../tools/get-feapp-status.ps1',import.meta.url)),'-FeappPath',path],{encoding:'utf8',windowsHide:true}));
+  await writeFile(f.layout.feappPath,zip(main));
+  assert.deepEqual(status(f.layout.feappPath), {clientFound:true,mounted:false,managed:true,updateAvailable:true,revision:'v11',port:27149});
+  f.readFeappStatus = async path => status(path); f.createOnMount = true;
+  const result = await resolver(f); assert.deepEqual(await readFile(result.feapp),zip());
+  assert.deepEqual(await readFile(f.layout.feappPath),zip(main),'resolution does not overwrite game');
+  await writeFile(f.layout.feappPath,zip(main.replace('/toy/searchPlaylist','/toy/unknown')));
+  assert.equal(status(f.layout.feappPath).managed,false);
+  await writeFile(f.layout.feappPath,zip(main.replace('27149','27150')));
+  assert.equal(status(f.layout.feappPath).managed,false);
+});
 
 for (const [name, outsideFe, outsideWp] of [
   ['patched external originals', zip('/*OliviaSoulPatch:old*/external()'), zip('/*OliviaSoulPatch:old*/externalPlayer()')],
@@ -314,6 +332,16 @@ test('inline locale identity permits the current v32 FE after mount registration
   const f = await inlineLocaleFixture({ revision: 'v32', markerRevision: 'v32' });
   f.readFeappStatus = async path => path === f.layout.feappPath
     ? { clientFound: true, mounted: true, managed: true, updateAvailable: false, revision: 'v32', port: 27149 }
+    : { clientFound: true, mounted: false, managed: false, updateAvailable: false, revision: null, port: null };
+  const result = await resolver(f);
+  assert.deepEqual(await readFile(result.feapp), f.original);
+  assert.deepEqual(await readFile(result.webplayer), zip('player()'));
+});
+
+for (const revision of ['v41', 'v42', 'v43', 'v44']) test(`inline locale identity permits ${revision} FE after mount registration`, async () => {
+  const f = await inlineLocaleFixture({ revision, markerRevision: revision });
+  f.readFeappStatus = async path => path === f.layout.feappPath
+    ? { clientFound: true, mounted: true, managed: true, updateAvailable: false, revision, port: 27149 }
     : { clientFound: true, mounted: false, managed: false, updateAvailable: false, revision: null, port: null };
   const result = await resolver(f);
   assert.deepEqual(await readFile(result.feapp), f.original);

@@ -17,6 +17,15 @@ function powershell(command) {
   return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { encoding: 'utf8' });
 }
 const parse = `$ErrorActionPreference='Stop'; $tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseFile(${quote(script)},[ref]$tokens,[ref]$errors); if($errors.Count){throw $errors[0]};`;
+
+test('installer-only checksums do not require or list a portable archive', async () => {
+  const root = await fixture();
+  await writeFile(join(root, 'OliviaSoul-2008.2.7-Setup.exe'), 'fixture');
+  const result = powershell(`& ${quote(script)} -OutputDirectory ${quote(root)} -ChecksumOnly -InstallerOnly`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const sums = await readFile(join(root, 'SHA256SUMS.txt'), 'utf8');
+  assert.match(sums, /Setup\.exe/); assert.doesNotMatch(sums, /Portable/);
+});
 async function put(root, name, content = '') {
   await mkdir(dirname(join(root, name)), { recursive: true });
   await writeFile(join(root, name), content);

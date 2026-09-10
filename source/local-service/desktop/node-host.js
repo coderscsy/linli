@@ -37,6 +37,7 @@ const controller = new DesktopController({
   usersettingsPath,
   executable,
   onPortChanged: port => send({ type: "port", port }),
+  onLyricsFrame: data => send({ type: "lyrics", data }),
 });
 const port = await controller.initialize();
 console.log(`startup-stage=service-ready elapsedMs=${Date.now() - startupStartedAt}`);
@@ -54,6 +55,10 @@ async function close(reason) {
 }
 
 const handlers = {
+  getLyrics: () => controller.service.lyrics.snapshot(),
+  setLyrics: patch => controller.service.lyrics.updateSettings(patch),
+  adjustLyricsOffset: request => controller.service.lyrics.adjustOffset(request),
+  lyricsPlayerControl: request => controller.service.lyricsPlayback.request(request),
   getSettings: () => controller.getSettings(),
   setAutoStart: enabled => controller.setAutoStart(enabled === true),
   setClient: path => controller.setClient(path),

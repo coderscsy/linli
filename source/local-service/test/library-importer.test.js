@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { importPerformanceLibrary, scanPerformanceLibrary } from "../midi/library-importer.js";
+import { createSongPreviewResolver } from '../midi/song-preview-source.js';
 import { MidiStore } from "../midi/store.js";
 import { endOfTrack, midiFile, track } from "./fixtures/midi-fixtures.js";
 
@@ -31,6 +32,117 @@ async function libraryFixture() {
     },
   };
 }
+
+test('verified duplicate import records another root and recovers after the original disappears', async () => {
+  const ctx=await libraryFixture();
+  try {
+    const first=join(ctx.libraryRoot,'Original'), second=join(ctx.root,'B');
+    await mkdir(first);await mkdir(join(second,'Original'),{recursive:true});
+    await writeFile(join(first,'DEFAULT.mp4'),'same-video');
+    await writeFile(join(second,'Original','DEFAULT.mp4'),'same-video');
+    const options={store:ctx.store,queue:{},mode:'reference',probeVideoDurationUs:async()=>1000000};
+    await importPerformanceLibrary(await scanPerformanceLibrary(ctx.libraryRoot),options);
+    const id=ctx.store.listUserSongs()[0].id;
+    ctx.store.updateUserSongMetadata(id,{name:'Renamed'});
+    await importPerformanceLibrary(await scanPerformanceLibrary(second),options);
+    await rm(first,{recursive:true,force:true});
+    const song=ctx.store.getUserSong(id);
+    assert.equal(song.name,'Renamed');assert.equal(ctx.store.listUserSongs().length,1);
+    assert.deepEqual(song.sourceRoots,[ctx.libraryRoot,second]);
+    const resolvePreview=createSongPreviewResolver({resolvePath:p=>ctx.store.resolvePath(p),getLibraryRoot:()=>join(ctx.root,'unrelated')});
+    try {assert.equal(await resolvePreview(song,'DEFAULT'),join(second,'Original','DEFAULT.mp4'));}
+    finally {await resolvePreview.close();}
+  } finally {await ctx.close();}
+});
+
+test('background import cannot revive removed work; manual import restores its identity and metadata',async()=>{
+ const ctx=await libraryFixture();try{
+  const folder=join(ctx.libraryRoot,'Song');await mkdir(folder);await writeFile(join(folder,'DEFAULT.mp4'),'video');
+  const preview=await scanPerformanceLibrary(ctx.libraryRoot),options={store:ctx.store,queue:{},mode:'reference',probeVideoDurationUs:async()=>1000000};
+  await importPerformanceLibrary(preview,options);
+  const id=ctx.store.listUserSongs()[0].id;ctx.store.updateUserSongMetadata(id,{name:'Edited'});ctx.store.removeUserSong(id);
+  await importPerformanceLibrary(preview,{...options,restoreRemoved:false});assert.equal(ctx.store.getUserSong(id),null);
+  const restored=await importPerformanceLibrary(preview,options);
+  assert.equal(restored.imported,1);assert.equal(ctx.store.getUserSong(id).name,'Edited');assert.equal(ctx.store.listUserSongs().length,1);
+ }finally{await ctx.close();}
+});
+
+test('selecting a midi performance root groups all three videos and preserves identity across parent imports', async () => {
+  const ctx = await libraryFixture();
+  try {
+    const folder = join(ctx.libraryRoot, 'midi_338_1783932122');
+    await mkdir(folder);
+    const names = ['take_TOD1200_WI_R.mp4', 'take_TOD1730_NI_L.mp4', 'take_TOD2000_NI_L.mp4'];
+    for (const name of names) await writeFile(join(folder, name), name);
+    await writeFile(join(folder, 'score.mid'), midiFile({tracks:[track(endOfTrack())]}));
+    const direct = await scanPerformanceLibrary(folder);
+    assert.equal(direct.entries.length, 1);
+    assert.equal(Object.keys(direct.entries[0].videoByTodView).length, 3);
+    assert.equal(direct.entries[0].midiPath, join(folder, 'score.mid'));
+    const options = {store:ctx.store, queue:{}, mode:'reference', probeVideoDurationUs:async()=>1000000};
+    assert.equal((await importPerformanceLibrary(direct, options)).imported, 1);
+    const song = ctx.store.listUserSongs()[0];
+    assert.equal(Object.keys(song.videoByTodView).length, 3);
+    assert.deepEqual(song.sourceRoots, [folder]);
+    ctx.store.updateUserSongMetadata(song.id, {name:'保留修改后的曲名'});
+    assert.equal((await importPerformanceLibrary(await scanPerformanceLibrary(ctx.libraryRoot), options)).imported, 0);
+    assert.equal((await importPerformanceLibrary(direct, options)).imported, 0);
+    assert.equal(ctx.store.listUserSongs().length, 1);
+    assert.equal(ctx.store.getUserSong(song.id).name, '保留修改后的曲名');
+    for (const name of names) assert.equal(await readFile(join(folder, name), 'utf8'), name);
+  } finally { await ctx.close(); }
+});
+
+test('ordinary loose videos remain separate works when the selected root is not a midi performance folder', async () => {
+  const ctx = await libraryFixture();
+  try {
+    for (const name of ['甲.mp4','乙.mp4','丙.mp4']) await writeFile(join(ctx.libraryRoot,name),name);
+    const preview = await scanPerformanceLibrary(ctx.libraryRoot);
+    assert.equal(preview.entries.length, 3);
+    assert.ok(preview.entries.every(entry=>Object.keys(entry.videoByTodView).length===1));
+  } finally { await ctx.close(); }
+});
+
+test('renamed game cache folder keeps three hash-named variants and the existing corrected work', async () => {
+  const ctx = await libraryFixture();
+  try {
+    const original = join(ctx.libraryRoot,'midi_338_1783932122');
+    const renamed = join(ctx.libraryRoot,'用户改过的作品名称');
+    await mkdir(original);
+    for (const name of ['5dd90111a820157b5471a6a3250cf2b1','66c734a1e0ab993eea0281cbb3596785','e9bbc0469937a449806494466c7f0191'])
+      await writeFile(join(original,name+'.mp4'),name);
+    const options = {store:ctx.store,queue:{},mode:'reference',probeVideoDurationUs:async()=>1000000};
+    await importPerformanceLibrary(await scanPerformanceLibrary(original),options);
+    const id = ctx.store.listUserSongs()[0].id;
+    ctx.store.updateUserSongMetadata(id,{name:'已纠正曲名'});
+    await rename(original,renamed);
+    const preview = await scanPerformanceLibrary(renamed);
+    assert.equal(preview.entries.length,1);
+    assert.equal(Object.keys(preview.entries[0].videoByTodView).length,3);
+    assert.equal((await importPerformanceLibrary(preview,options)).imported,0);
+    assert.equal(ctx.store.listUserSongs().length,1);
+    const song = ctx.store.getUserSong(id);
+    assert.equal(song.name,'已纠正曲名');
+    assert.ok(song.sourceRoots.includes(renamed));
+    const resolvePreview = createSongPreviewResolver({resolvePath:p=>ctx.store.resolvePath(p),getLibraryRoot:()=>renamed});
+    try {
+      assert.equal(await resolvePreview(song,'DEFAULT'),join(renamed,'5dd90111a820157b5471a6a3250cf2b1.mp4'));
+      await writeFile(join(renamed,'66c734a1e0ab993eea0281cbb3596785.mp4'),'different work');
+      await assert.rejects(resolvePreview(song,'DEFAULT'),{code:'MEDIA_PREVIEW_UNAVAILABLE'});
+    }
+    finally { await resolvePreview.close(); }
+  } finally { await ctx.close(); }
+});
+
+test('renamed TOD folder groups one filename family but does not merge different named songs', async () => {
+  const ctx = await libraryFixture();
+  try {
+    for(const name of ['take_TOD1200_WI_R','take_TOD1730_NI_L','take_TOD2000_NI_L']) await writeFile(join(ctx.libraryRoot,name+'.mp4'),name);
+    assert.equal((await scanPerformanceLibrary(ctx.libraryRoot)).entries.length,1);
+    await writeFile(join(ctx.libraryRoot,'another_TOD1200_WI_R.mp4'),'another');
+    assert.equal((await scanPerformanceLibrary(ctx.libraryRoot)).entries.length,4);
+  } finally { await ctx.close(); }
+});
 
 test("library scanner groups top-level songs and selects TOD1730_NI_L", async () => {
   const ctx = await libraryFixture();

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Olivia Soul</title>
   <link rel="stylesheet" href="/admin/styles.css">
+  <link rel="stylesheet" href="/admin/lyrics-settings.css">
 </head>
 <body>
   <main>
@@ -21,11 +22,11 @@
 
     <div class="workspace">
       <aside class="panel sidebar">
-        <div class="sideTitle">管理</div>
         <nav class="sideTabs" aria-label="管理页签">
           <button class="sideTab active" type="button" data-tab="settings">基础设置</button>
           <button class="sideTab" type="button" data-tab="ai">AI 模型</button>
           <button class="sideTab" type="button" data-tab="desktop">客户端与桌面</button>
+          <button class="sideTab" type="button" data-tab="lyrics">歌词设置</button>
           <button class="sideTab" type="button" data-tab="performances">官方作品</button>
           <button class="sideTab" type="button" data-tab="memory">记忆</button>
           <button class="sideTab" type="button" data-tab="transcription">视频转文字</button>
@@ -207,6 +208,11 @@
               </div>
               <span id="serviceMountStatus" class="mountStatus">正在检测</span>
             </div>
+            <div class="actions serviceMountActions">
+              <button id="mountService" type="button">启用服务</button>
+              <button id="restoreClient" class="secondary" type="button" hidden>停用服务</button>
+              <span id="serviceMountResult" class="result"></span>
+            </div>
             <div class="serviceMountBody">
               <div class="clientPicker">
                 <label for="clientExe">游戏客户端</label>
@@ -220,11 +226,6 @@
                 <input id="servicePort" type="number" min="1024" max="65535" step="1" inputmode="numeric">
               </div>
               <p id="serviceMountDetail" class="mountDetail"></p>
-            </div>
-            <div class="actions">
-              <button id="mountService" type="button">启用服务</button>
-              <button id="restoreClient" class="secondary" type="button" hidden>停用服务</button>
-              <span id="serviceMountResult" class="result"></span>
             </div>
           </section>
           <section id="desktopSettings" class="appSettings desktopSection" hidden>
@@ -261,7 +262,7 @@
                 </dd>
               </div>
               <div class="storageReferenceRow">
-                <dt>作品当前引用位置</dt>
+                <dt>已引用目录</dt>
                 <dd>
                   <details id="storageReferencedDetails" class="storageReferenceDetails">
                     <summary id="storageReferenceSummary">尚未读取</summary>
@@ -282,6 +283,37 @@
               <button id="confirmStorageMigration" type="button" disabled>确认迁移</button>
               <span id="storageError" class="result"></span>
             </div>
+          </section>
+        </section>
+
+        <section class="panel tabPage" data-page="lyrics" hidden>
+          <div class="panelHead"><div><h2>歌词设置</h2><p>设置桌面歌词的显示与外观，不影响歌曲播放</p></div></div>
+          <section id="lyricsSettings" class="settingsBlock lyricsSettings" aria-label="歌词设置">
+            <div class="lyricsHeading"><div><strong>桌面歌词</strong><small>轻量显示 · 跟随当前演奏</small></div><button id="lyricsReset" type="button" title="只恢复外观，不删除歌词绑定与偏移">恢复外观默认</button></div>
+            <div class="lyricsGroup">
+              <label class="checkbox"><input id="lyricsEnabled" type="checkbox"><span>启用歌词</span></label>
+              <p class="fieldHint">开启后，播放已关联歌词的作品时自动显示。关闭不影响歌曲播放。</p>
+              <div class="lyricsChecks"><label class="checkbox"><input id="lyricsLocked" type="checkbox"><span>锁定位置 / 鼠标穿透</span></label>
+              <label class="checkbox"><input id="lyricsAnimate" type="checkbox" checked><span>换句渐显</span></label></div>
+              <p class="fieldHint">锁定后可从此处或托盘解除；渐显仅按句切换，不是逐字高亮。</p>
+            </div>
+            <div class="lyricsGroup lyricsGrid">
+              <label class="lyricsField">显示行数<select id="lyricsLineMode"><option value="single">单行显示</option><option value="double" selected>双行显示</option></select></label>
+              <label class="lyricsField">显示方向<select id="lyricsOrientation"><option value="horizontal">横排显示</option><option value="vertical">竖排显示</option></select></label>
+              <label class="lyricsField">字体<select id="lyricsFontFamily"><option value="auto">默认（优先林离回信字体）</option></select><small id="lyricsResolvedFont">正在读取系统字体</small></label>
+              <label class="lyricsField">字号<input id="lyricsFontSize" type="number" min="16" max="64" value="28"></label>
+              <label class="lyricsField">字重<select id="lyricsFontWeight"><option value="normal">常规</option><option value="bold">粗体</option></select></label>
+              <p class="fieldHint lyricsFull">默认优先使用已安装的回信字体；未安装时回退到楷体或系统字体。不附带游戏字体。</p>
+            </div>
+            <div class="lyricsGroup lyricsGrid">
+              <label class="lyricsField lyricsFull">颜色方案<select id="lyricsPreset"><option value="custom">自定义</option><option value="gold">暖金</option><option value="ocean">海洋蓝</option><option value="mint">清绿</option><option value="white">纯白</option></select></label>
+              <label class="lyricsField">当前句<input id="lyricsCurrentColor" type="color" value="#ffebaa"></label>
+              <label class="lyricsField">下一句<input id="lyricsNextColor" type="color" value="#ffffff"></label>
+              <label class="lyricsField lyricsFull">不透明度 <output id="lyricsOpacityValue" for="lyricsOpacity">100%</output><input id="lyricsOpacity" type="range" min="20" max="100" step="1" value="100"></label>
+            </div>
+            <div class="lyricsPreviewBox"><small>样式预览 · 不会启动音乐</small><div id="lyricsPreview" class="lyricsPreview"><div id="lyricsPreviewCurrent">让音乐陪伴每一个日常</div><div id="lyricsPreviewNext">下一句歌词会显示在这里</div></div></div>
+            <p class="fieldHint">未锁定时拖动歌词调整位置。请在作品“名称 / 时段”编辑器中为实际媒体版本导入 LRC。</p>
+            <p id="lyricsStatus" class="fieldHint" role="status">歌词默认关闭</p>
           </section>
         </section>
 
@@ -348,9 +380,17 @@
               <div class="performanceTools">
                 <input id="midiSongSearch" type="search" placeholder="搜索我的上传">
                 <button id="refreshMidiStatus" class="secondary compact" type="button">刷新</button>
+                <button id="removeSelectedSongs" class="secondary compact" type="button" disabled>移除所选（0）</button>
               </div>
             </div>
             <small id="midiDataRoot" class="performancePath" title="正在读取数据目录">正在读取数据目录</small>
+            <details id="midiReferencedDetails" class="librarySourceDetails">
+              <summary id="midiReferencedSummary">已引用目录（0 个）</summary>
+              <ul id="midiReferencedRoots"></ul>
+              <small id="midiSourceNotice"></small>
+              <small id="midiWatchNotice"></small>
+            </details>
+            <small id="midiSelectionSummary" class="performancePath" role="status" aria-live="polite">共 0 首 · 已选 0 首</small>
             <div class="performanceColumns">
               <div>
                 <h3>曲目</h3>

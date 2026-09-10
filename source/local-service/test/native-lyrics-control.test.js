@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+import {createNativeLyricsControl} from '../lyrics/native-control.js';
+test('official control waits for actual player acknowledgement and rejects stale commands',async()=>{
+ const state={songId:'official:a',sessionId:'native:s',playbackState:'playing'};
+ const control=createNativeLyricsControl({getState:()=>state,notify(){}});
+ const pending=control.request({...state,action:'pause'});
+ assert.equal(control.ack({id:'old',ok:true,currentTime:9,duration:100}).ok,false);
+ control.ack({id:control.poll().id,ok:true,currentTime:9,duration:100});
+ assert.equal((await pending).currentTime,9);
+ assert.throws(()=>control.request({...state,sessionId:'old',action:'resume'}));
+ const waiting=control.request({...state,action:'resume'});control.close();await assert.rejects(waiting);
+});
+test('native WebPlayer pause saves actual position and resume restores it; wallpaper events remain separate',async()=>{
+ const posts=[];let restores=0;
+ const player={currentSrc:'official.mp4',currentTime:42,duration:100,pause(){}};
+ const window={__OliviaSoulRestoreDefaultPlayback:()=>restores++};
+ const context={window,i:{value:player},Date,AbortSignal,fetch:async(url,opts)=>{posts.push(JSON.parse(opts.body));}};
+ vm.createContext(context);vm.runInContext(readFileSync(new URL('../../tools/webplayer-pause.js',import.meta.url),'utf8'),context);
+ context.OliviaSoulSwapPlayback=(url,opts,done)=>{assert.equal(url,'official.mp4');assert.equal(opts.offset,42);player.currentSrc=url;player.currentTime=42;done(true)};
+ const command={id:'one',action:'pause',songId:'official:a',sessionId:'native:s',expiresAt:Date.now()+5000};
+ await context.OliviaSoulNativeLyricsCommand(command);
+ assert.equal(restores,1);assert.equal(posts.at(-1).currentTime,42);
+ player.currentSrc='wallpaper.mp4';player.currentTime=7;
+ await context.OliviaSoulNativeLyricsCommand(command);assert.equal(restores,1);
+ await context.OliviaSoulNativeLyricsCommand({...command,id:'two',action:'resume'});
+ assert.equal(posts.at(-1).ok,true);assert.equal(window.__OliviaSoulNativePaused,null);
+});

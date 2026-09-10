@@ -1,5 +1,11 @@
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
+import { createLyricsService } from "./lyrics/service.js";
+import { lyricsRoute } from "./lyrics/routes.js";
+import { createLyricsPlayback } from "./lyrics/playback.js";
+import { createCommandEvents } from "./lyrics/command-events.js";
+import { createNativeLyricsObserver } from './lyrics/native.js';
+import { createNativeLyricsControl } from './lyrics/native-control.js';
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile, mkdir, open, rename, rm, stat, statfs } from "node:fs/promises";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
@@ -23,6 +29,8 @@ import { MidiStore } from "./midi/store.js";
 import { createMidiRoutes, formatSong } from "./midi/routes.js";
 import { describeSongMetadata, selectSongVariant, songVariants } from "./midi/song-metadata.js";
 import { createSongPreviewResolver } from "./midi/song-preview-source.js";
+import { removeLibrarySongs } from './midi/library-removal.js';
+import { summarizeLibrarySources } from './midi/library-sources.js';
 import { createSongNameCorrections } from "./midi/song-name-corrections.js";
 import { playbackTimeOfDay } from "./midi/playback-clock.js";
 import { importPerformanceLibrary, scanPerformanceLibrary } from "./midi/library-importer.js";
@@ -69,7 +77,7 @@ const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 const DEFAULT_UPDATE_REPOSITORY = "coderscsy/linli";
-const DEFAULT_UPDATE_TAG = "2008.2.7-linli.7";
+const DEFAULT_UPDATE_TAG = "2008.2.7-linli.8";
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions?/i,
   /system\s*prompt/i,
@@ -622,6 +630,7 @@ export async function createOliviaService(options = {}) {
   const resolveSongPreview = createSongPreviewResolver({
     resolvePath: path => midiStore.resolvePath(path),
     getLibraryRoot: () => getSetting(MIDI_LIBRARY_ROOT_SETTING),
+    getLibraryRoots: () => midiStore.listLibraryRoots(),
   });
   const storageMigration = createStorageMigrationManager({
     db,
@@ -1250,11 +1259,6 @@ export async function createOliviaService(options = {}) {
   };
   const midiLibrarySyncIntervalMs = Math.max(20, Number(options.midiLibrarySyncIntervalMs ?? 60_000));
   const midiLibraryWatchFactory = options.midiLibraryWatchFactory ?? watchPerformanceLibrary;
-  const officialMediaDirectory = () => {
-    if (options.officialMediaRoot) return resolve(options.officialMediaRoot);
-    if (!storageStatus.activePath) throw httpError(409, "尚未取得游戏设置的曲目保存路径");
-    return storageDirectories(storageStatus.activePath).performances;
-  };
 
   function resetMidiLibraryWatcher() {
     const libraryRoot = String(getSetting(MIDI_LIBRARY_ROOT_SETTING) ?? "").trim();
@@ -1282,17 +1286,24 @@ export async function createOliviaService(options = {}) {
     if (!libraryRoot) return Promise.resolve({ imported: 0, skipped: 0, total: 0, mode: "reference", details: [] });
     midiLibrarySyncPromise = (async () => {
       const preview = await scanPerformanceLibrary(libraryRoot);
-      return importPerformanceLibrary(preview, {
+      const result = await importPerformanceLibrary(preview, {
         store: midiStore,
         queue: midiQueue,
         mode: "reference",
-        managedRoot: officialMediaDirectory(),
+        restoreRemoved: false,
         probeVideoDurationUs,
       });
+      if (result.imported > 0) notifyLibraryChanged();
+      return result;
     })().finally(() => {
       midiLibrarySyncPromise = null;
     });
     return midiLibrarySyncPromise;
+  }
+
+  function notifyLibraryChanged() {
+    commandEvents.notify('lyrics', {type:'library-changed'});
+    commandEvents.notify('library', {type:'library-changed'});
   }
 
   function scheduleMidiLibrarySync() {
@@ -2525,6 +2536,14 @@ export async function createOliviaService(options = {}) {
     return Object.assign(httpError(status, message, code), { mediaResponse: true });
   }
 
+  const lyrics = await createLyricsService({ db, root: options.appData ?? root,
+    getSong: id => midiStore.getUserSong(id), onFrame: options.onLyricsFrame });
+  const commandEvents = createCommandEvents();
+  const nativeLyrics = createNativeLyricsObserver({observe:lyrics.observe,
+    localActive:()=>['playing','paused'].includes(localPlayerState.playbackState)});
+  const nativeLyricsControl=createNativeLyricsControl({getState:()=>nativeLyrics.state(),notify:()=>commandEvents.notify('player')});
+  const lyricsPlayback = createLyricsPlayback({getState:()=>nativeLyrics.state() || localPlayerState,notify:()=>commandEvents.notify('lyrics')});
+
   async function resolvePlaybackSource(song, key) {
     try {
       // Use the same identity/root/variant validation as preview recovery. A
@@ -2577,6 +2596,7 @@ export async function createOliviaService(options = {}) {
             currentTime: ended ? duration : Math.min(localPlayerState.currentTime, duration || localPlayerState.currentTime),
             ...(ended ? { event: "ended", playbackState: "ended" } : {}),
           };
+          lyrics.observe(localPlayerState, localPlayerResolvedSource);
         }
       }
     });
@@ -2604,7 +2624,7 @@ export async function createOliviaService(options = {}) {
 
   async function serveStatic(req, res, pathname) {
     const relative = pathname === "/admin" || pathname === "/admin/" ? "index.html" : pathname.slice("/admin/".length);
-    if (!["index.html", "app.js", "song-editor.js", "update-download-ui.js", "tab-notices.js", "styles.css", "olivia-soul-gold.png"].includes(relative))
+    if (!["index.html", "app.js", "game-lyrics.js", "lyrics-settings.js", "lyrics-settings.css", "song-editor.js", "update-download-ui.js", "tab-notices.js", "styles.css", "olivia-soul-gold.png"].includes(relative))
       throw httpError(404, "文件不存在");
     const file = join(publicRoot, relative);
     const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png" };
@@ -2627,6 +2647,41 @@ export async function createOliviaService(options = {}) {
       return res.end();
     }
     if (path.startsWith("/toy/")) lastClientAt = nowSeconds();
+    if (req.method === 'GET' && path === '/toy/command-events')
+      return commandEvents.subscribe(req,res,url.searchParams.get('channel'),corsHeaders(req));
+    if (path === '/toy/lyrics/playback') {
+      if (req.method === 'GET') return ok(req,res,lyricsPlayback.poll(),{'Cache-Control':'no-store'});
+      if (req.method === 'POST') {
+        const body=await readJson(req);
+        return ok(req,res,body.action ? await lyricsPlayback.request(body) : lyricsPlayback.ack(body),{'Cache-Control':'no-store'});
+      }
+    }
+    if (req.method === 'POST' && path === '/toy/lyrics/native-state')
+      return ok(req,res,nativeLyrics.report(await readJson(req)),{'Cache-Control':'no-store'});
+    if(req.method==='POST'&&path==='/toy/lyrics/native-control')return ok(req,res,await nativeLyricsControl.request(await readJson(req)));
+    if(req.method==='POST'&&path==='/toy/lyrics/native-result')return ok(req,res,nativeLyricsControl.ack(await readJson(req)));
+    if(req.method==='POST' && ['/admin/api/media/songs/remove','/toy/media/songs/remove','/toy/deleteUserSong'].includes(path)){
+      const body=await readJson(req);
+      let counts;
+      const result=removeLibrarySongs({db,store:midiStore,ids:body.ids ?? [body.userSongId ?? body.songId ?? body.id],onRemoved:ids=>{
+        resolveSongPreview.invalidate();
+        if(ids.includes(localPlayerState.songId)){
+          ++localPlayerPlayRequest;
+          const {songId,sessionId}=localPlayerState;
+          localPlayerCommand={revision:localPlayerCommand.revision+1,command:{cmd:'stop',songId,sessionId,restoreDefault:true}};
+          localPlayerState={...localPlayerState,revision:localPlayerCommand.revision,commandRevision:localPlayerCommand.revision,event:'stop',playbackState:'stopped',currentTime:0};
+          localPlayerResolvedSource=null;localPlayerDurationCheck=null;localPlayerPendingSeek=null;
+          lyrics.observe(localPlayerState,null);commandEvents.notify('player');
+        }
+        counts={libraryTotal:midiStore.pagePublishedUserSongs({pageSize:1}).total,
+          playlistTotal:Number(db.prepare('SELECT COUNT(*) count FROM playlist_items WHERE user_id=?').get(getLocalUser().id).count),revision:midiStore.libraryRevision()};
+        commandEvents.notify('lyrics',{type:'library-removed',ids,counts});
+        commandEvents.notify('library',{type:'library-changed'});
+      }});
+      return ok(req,res,path==='/toy/deleteUserSong'?{...result,counts,userSongId:result.ids[0],deleted:result.removed>0}:{...result,counts});
+    }
+    const lyricsResult = await lyricsRoute(req, path, lyrics, readJson);
+    if (lyricsResult !== null) return ok(req, res, lyricsResult, { "Cache-Control": "no-store" });
 
     const songMetadataMatch = /^\/(?:admin\/api|toy)\/media\/songs\/([^/]+)\/metadata$/u.exec(path);
     if (songMetadataMatch && (req.method === "GET" || req.method === "POST")) {
@@ -2677,16 +2732,16 @@ export async function createOliviaService(options = {}) {
     }
 
     if (req.method === "GET" && path === "/toy/player-command") {
-      return ok(req, res, localPlayerCommand, { "Cache-Control": "no-store" });
+      return ok(req, res, {...localPlayerCommand,nativeCommand:nativeLyricsControl.poll()}, { "Cache-Control": "no-store" });
     }
     if (req.method === "POST" && path === "/toy/player-command") {
       const body = await readJson(req);
       const requestedCmd = String(body.cmd ?? "");
-      const supportedCommands = new Set(["play", "pause", "resume", "stop", "seek", "setVolume", "setMute", "setLoop"]);
+      const supportedCommands = new Set(["play", "pause", "suspend", "resume", "stop", "seek", "setVolume", "setMute", "setLoop"]);
       if (!supportedCommands.has(requestedCmd)) throw httpError(400, "播放器命令无效");
       // The game presents pause as closing the current performance. Keep accepting
       // the legacy command, but publish one terminal stop transition everywhere.
-      const cmd = requestedCmd === "pause" ? "stop" : requestedCmd;
+      const cmd = requestedCmd === "pause" ? "stop" : requestedCmd === "suspend" ? "pause" : requestedCmd;
       let command;
       let songId;
       let name;
@@ -2733,6 +2788,7 @@ export async function createOliviaService(options = {}) {
           throw httpError(409, "当前演奏已经结束，无法继续播放");
         name = localPlayerState.name;
         command = { cmd, songId, sessionId };
+        if (requestedCmd === 'suspend') command.preserveSession = true;
         if (cmd === "seek") {
           const offset = Number(body.offset);
           if (!Number.isFinite(offset) || offset < 0) throw httpError(400, "拖动位置无效");
@@ -2800,7 +2856,9 @@ export async function createOliviaService(options = {}) {
       if (cmd === "play") verifySelectedPlaybackDuration(selectedVideoPath, command.sessionId, command.url,
         selectedVideoPath !== midiStore.resolvePath(song.videoPath));
       else if (cmd === "stop") localPlayerDurationCheck = null;
+      lyrics.observe(localPlayerState, localPlayerResolvedSource);
       console.log(`[player-command] revision=${localPlayerCommand.revision} cmd=${cmd} song=${songId}`);
+      commandEvents.notify('player');
       return ok(req, res, localPlayerCommand, { "Cache-Control": "no-store" });
     }
     if (req.method === "GET" && path === "/toy/player-state") {
@@ -2833,7 +2891,8 @@ export async function createOliviaService(options = {}) {
       const currentTime = Number(body.currentTime);
       if (!Number.isFinite(currentTime) || currentTime < 0 || !Number.isFinite(duration) || duration < 0)
         throw httpError(400, "播放时间无效");
-      if (body.event === "timeupdate" && localPlayerState.playbackState !== "playing")
+      if (body.event === "timeupdate" && localPlayerState.playbackState !== "playing"
+        && !(localPlayerState.playbackState === 'paused' && body.paused === true))
         return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
       if (body.event === "timeupdate" && localPlayerPendingSeek?.commandRevision === commandRevision) {
         const closeToRequestedTime = Math.abs(currentTime - localPlayerPendingSeek.offset) <= 2;
@@ -2879,6 +2938,7 @@ export async function createOliviaService(options = {}) {
         duration: normalizedDuration,
         mediaUrl,
       };
+      lyrics.observe(localPlayerState, localPlayerResolvedSource, true);
       return ok(req, res, localPlayerState, { "Cache-Control": "no-store" });
     }
 
@@ -3219,10 +3279,10 @@ export async function createOliviaService(options = {}) {
     }
 
     if (req.method === "GET" && path === "/admin/api/storage")
-      return ok(req, res, storageStatus);
+      return ok(req, res, {...storageStatus,...summarizeReferencedRoots(),librarySources:summarizeLibrarySources(midiStore.listPublishedUserSongs())});
 
     if (req.method === "POST" && path === "/admin/api/storage/refresh")
-      return ok(req, res, await refreshStorageStatus());
+      return ok(req, res, {...await refreshStorageStatus(),...summarizeReferencedRoots(),librarySources:summarizeLibrarySources(midiStore.listPublishedUserSongs())});
 
     if (req.method === "POST" && path === "/admin/api/storage/migration/preview") {
       if (!storageStatus.activePath) throw httpError(409, "尚未取得游戏设置的曲目保存路径");
@@ -3878,11 +3938,12 @@ export async function createOliviaService(options = {}) {
 
     if (req.method === "GET" && path === "/admin/api/midi") {
       const libraryRoot = getSetting(MIDI_LIBRARY_ROOT_SETTING) ?? "";
+      const songs=midiStore.listPublishedUserSongs();
       return ok(req, res, {
         dataRoot: libraryRoot || (options.officialMediaRoot
           ? resolve(options.officialMediaRoot)
           : storageStatus.activePath ? storageDirectories(storageStatus.activePath).performances : ""),
-        songs: midiStore.listPublishedUserSongs(),
+        songs,
         total: midiStore.pagePublishedUserSongs({ pageSize: 1 }).total,
         revision: midiStore.libraryRevision(),
         queue: {
@@ -3891,6 +3952,7 @@ export async function createOliviaService(options = {}) {
         },
         library: {
           root: libraryRoot,
+          sources:summarizeLibrarySources(songs),
           mode: "reference",
           syncing: Boolean(midiLibrarySyncPromise),
         },
@@ -3940,7 +4002,6 @@ export async function createOliviaService(options = {}) {
           store: midiStore,
           queue: midiQueue,
           mode: "reference",
-          managedRoot: officialMediaDirectory(),
           probeVideoDurationUs,
         });
       } catch (error) {
@@ -3963,6 +4024,7 @@ export async function createOliviaService(options = {}) {
       setSetting(MIDI_LIBRARY_MODE_SETTING, "reference");
       resetMidiLibraryWatcher();
       midiLibraryPreviews.delete(previewId);
+      notifyLibraryChanged();
       return ok(req, res, result);
     }
 
@@ -4028,6 +4090,7 @@ export async function createOliviaService(options = {}) {
   wakeWorker();
   return {
     db,
+    lyrics, lyricsPlayback,
     prepareUpdateInstall: path => updateDownloads.prepareInstall(path),
     midiStore,
     midiPipeline: null,
@@ -4071,6 +4134,10 @@ export async function createOliviaService(options = {}) {
     },
     async close() {
       closing = true;
+      await lyrics.close();
+      commandEvents.close();
+      nativeLyricsControl.close();
+      lyricsPlayback.close();
       const downloadsClosed = updateDownloads.close();
       const nameCorrectionsClosed = songNameCorrections.close();
       const previewSourcesClosed = resolveSongPreview.close?.();

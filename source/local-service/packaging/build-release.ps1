@@ -5,7 +5,8 @@ param(
     [string]$DotNet = "",
     [string]$Iscc = "",
     [switch]$ResolvePathsOnly,
-    [switch]$ChecksumOnly
+    [switch]$ChecksumOnly,
+    [switch]$InstallerOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -132,10 +133,8 @@ function Download-PinnedFile([string]$Url, [string]$Path) {
 }
 
 function Write-ReleaseChecksums([string]$Directory) {
-    $artifacts = @(
-        (Join-Path $Directory "OliviaSoul-$version-Setup.exe"),
-        (Join-Path $Directory "OliviaSoul-$version-Portable.zip")
-    )
+    $artifacts = @((Join-Path $Directory "OliviaSoul-$version-Setup.exe"))
+    if (-not $InstallerOnly) { $artifacts += (Join-Path $Directory "OliviaSoul-$version-Portable.zip") }
     $lines = foreach ($artifact in $artifacts) {
         if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
             throw "缺少发布文件：$artifact"
@@ -361,6 +360,10 @@ foreach ($name in @(
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
 }
 Copy-PublicFile (Join-Path $project "package.json") (Join-Path $stage "app\package.json")
+Ensure-Directory (Join-Path $stage "app\lyrics")
+foreach ($name in @('lrc.js', 'service.js', 'routes.js', 'playback.js', 'command-events.js', 'native.js', 'native-control.js')) {
+    Copy-PublicFile (Join-Path $project "lyrics\$name") (Join-Path $stage "app\lyrics\$name")
+}
 foreach ($name in @('ChineseSimplified.isl', 'English.isl', 'INNO-LICENSE.txt', 'LICENSE.txt', 'SOURCE.md')) {
     Copy-PublicFile (Join-Path $PSScriptRoot "languages\$name") (Join-Path $stage "installer\$name")
 }
@@ -372,7 +375,7 @@ Copy-Item -LiteralPath (Join-Path $project "public") -Destination (Join-Path $st
 Ensure-Directory (Join-Path $stage "app\midi")
 foreach ($name in @(
     "store.js", "routes.js", "song-metadata.js", "song-preview-source.js", "song-name-corrections.js",
-    "playback-clock.js", "library-importer.js", "library-watch.js", "media-probe.js", "duration-repair.js",
+    "playback-clock.js", "library-importer.js", "library-removal.js", "library-sources.js", "library-watch.js", "media-probe.js", "duration-repair.js",
     "process-runner.js", "catalog-manifest.js", "catalog-relink.js"
 )) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $project "midi") $name) -Destination (Join-Path $stage "app\midi") -Force
@@ -405,6 +408,8 @@ foreach ($name in @("patch-feapp-local.ps1", "patch-feapp-locale-local.ps1", "up
     Copy-PublicFile (Join-Path $repository "tools\$name") (Join-Path $stage "resources\workspace-template\tools\$name")
 }
 Copy-PublicFile (Join-Path $project "public\song-editor.js") (Join-Path $stage "resources\workspace-template\tools\song-editor.js")
+Copy-PublicFile (Join-Path $repository "tools\webplayer-pause.js") (Join-Path $stage "resources\workspace-template\tools\webplayer-pause.js")
+Copy-PublicFile (Join-Path $repository "tools\feapp-native-lyrics.js") (Join-Path $stage "resources\workspace-template\tools\feapp-native-lyrics.js")
 
 Assert-EmptyPackageDirectory -Path $OutputDirectory -ProtectedRoots @($project, $repository)
 $steamSource = Join-Path $repository "tools\steam-launcher"
@@ -426,6 +431,7 @@ $frozenStageFingerprint = $frozenReceipt.Fingerprint
 $portableCandidate = Join-Path $WorkDirectory "OliviaSoul-$version-Portable.candidate.zip"
 $auditedArtifactDirectory = Join-Path $WorkDirectory "audited-artifacts"
 $auditedPortable = Join-Path $auditedArtifactDirectory "OliviaSoul-$version-Portable.zip"
+if (-not $InstallerOnly) {
 $portableReceipt = Publish-AuditedPackageArchive `
     -Stage $frozenStage `
     -CandidateArchive $portableCandidate `
@@ -433,6 +439,7 @@ $portableReceipt = Publish-AuditedPackageArchive `
     -ForbiddenValues $forbiddenPackageValues `
     -TrustedFiles $trustedStageFiles `
     -ExpectedStageFingerprint $frozenStageFingerprint
+}
 
 if ([string]::IsNullOrWhiteSpace($Iscc)) {
     $candidates = @(@(
@@ -495,7 +502,9 @@ $setupHash = Assert-PublicPackageFile -Path $setupCandidate -RelativePath "Olivi
 
 $releaseCandidateDirectory = Join-Path $WorkDirectory "release-candidate"
 Ensure-Directory $releaseCandidateDirectory
-Copy-VerifiedPackageFile -Source $auditedPortable -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Portable.zip") -ExpectedSha256 $portableReceipt.ArchiveSha256
+if (-not $InstallerOnly) {
+    Copy-VerifiedPackageFile -Source $auditedPortable -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Portable.zip") -ExpectedSha256 $portableReceipt.ArchiveSha256
+}
 Copy-VerifiedPackageFile -Source $setupCandidate -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Setup.exe") -ExpectedSha256 $setupHash
 foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
     $guideManifestValue = [string]$frozenReceipt.Manifest[$name]
@@ -504,9 +513,9 @@ foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
     Copy-VerifiedPackageFile -Source (Join-Path $frozenStage $name) -Destination (Join-Path $releaseCandidateDirectory $name) -ExpectedSha256 $guideHash
 }
 $releaseTrustedFiles = @{
-    "OliviaSoul-$version-Portable.zip" = $portableReceipt.ArchiveSha256
     "OliviaSoul-$version-Setup.exe" = $setupHash
 }
+if (-not $InstallerOnly) { $releaseTrustedFiles["OliviaSoul-$version-Portable.zip"] = $portableReceipt.ArchiveSha256 }
 Write-ReleaseChecksums $releaseCandidateDirectory
 $releaseManifest = Get-PublicPackageTreeManifest -Path $releaseCandidateDirectory -ForbiddenValues $forbiddenPackageValues -TrustedFiles $releaseTrustedFiles
 $releaseFingerprint = Get-PackageManifestFingerprint $releaseManifest

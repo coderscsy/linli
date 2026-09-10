@@ -48,6 +48,29 @@ test("current multi-variant content hashes recover the same work", async t => {
   const f = await fixture(t, { legacy: false });
   assert.equal(await f.resolvePreview(f.song, "ALT_3"), join(f.library, f.variants.ALT_3));
 });
+test("recorded source survives importing an unrelated root and an offline source", async t => {
+  const f = await fixture(t);
+  f.song.sourceRoots = [join(f.root, 'offline'), f.library];
+  f.setRoot(join(f.root, 'unrelated'));
+  assert.equal(await f.resolvePreview(f.song, 'ALT_2'), join(f.library, f.variants.ALT_2));
+});
+test('legacy work without its own roots recovers from registered historical roots',async t=>{
+  let roots=[];
+  const f=await fixture(t,{resolverOptions:{getLibraryRoots:()=>roots}});
+  roots=[f.library];f.setRoot(join(f.root,'unrelated'));
+  assert.equal(await f.resolvePreview(f.song,'DEFAULT'),join(f.library,f.variants.DEFAULT));
+});
+test('switching between recorded roots reuses bounded indexes instead of rescanning every song', async t => {
+  let scans=0;
+  const a=await fixture(t,{resolverOptions:{scanLibrary:async root=>{scans++;return scanPerformanceLibrary(root);}}});
+  const b=await fixture(t);
+  a.song.sourceRoots=[a.library];b.song.sourceRoots=[b.library];
+  a.setRoot('');
+  await a.resolvePreview(a.song,'DEFAULT');
+  await a.resolvePreview(b.song,'DEFAULT');
+  await a.resolvePreview(a.song,'ALT_2');
+  assert.equal(scans,2);
+});
 test("registered existing file wins without scanning an unrelated library", async t => {
   const f = await fixture(t);
   const actual = join(f.library, f.variants.DEFAULT);

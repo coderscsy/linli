@@ -507,18 +507,19 @@ function renderStorageStatus(status) {
   $("#storageConfiguredPath").title = status.configuredPath || "";
   $("#storageActivePath").textContent = status.activePath || "暂无有效路径";
   $("#storageActivePath").title = status.activePath || "";
-  const roots = Array.isArray(status.referencedRoots) ? status.referencedRoots : [];
+  const sourceSummary=status.librarySources;
+  const roots = Array.isArray(sourceSummary?.roots) ? sourceSummary.roots : [];
   const referenced = roots.length
-    ? roots.map(root => `${root.path}（${root.works} 个作品，${root.files} 个视频文件${Number.isInteger(root.missing) ? `，${root.missing} 个缺失` : ""}）`).join("\n")
-    : "当前数据库没有外部作品引用";
-  $("#storageReferencedRoots").textContent = referenced;
+    ? roots.map(root => `${root.path}（关联 ${root.works} 个作品）`).join("\n")
+    : "暂无已登记的来源目录";
+  const unknown=Number(sourceSummary?.unconfirmedWorks||0);
+  $("#storageReferencedRoots").textContent = referenced+(unknown?`\n${unknown} 个旧作品来源待确认；未将历史缓存当作真实来源。`:"");
   $("#storageReferencedRoots").title = referenced;
   const summaryParts = [
-    `${Number(status.workCount ?? 0)} 个作品`,
-    `${Number(status.referencedFileCount ?? 0)} 个视频文件`,
-    `${Number(status.referencedRootCount ?? roots.length)} 个来源目录`,
+    `${Number(sourceSummary?.workCount ?? status.workCount ?? 0)} 个作品`,
+    `${roots.length} 个来源目录`,
   ];
-  if (Number.isInteger(status.missingFileCount)) summaryParts.push(`${status.missingFileCount} 个缺失`);
+  if(unknown)summaryParts.push(`${unknown} 个来源待确认`);
   $("#storageReferenceSummary").textContent = summaryParts.join(" · ");
   $("#storageManagedPath").textContent = status.managedPath || "尚未取得游戏保存路径";
   $("#storageManagedPath").title = status.managedPath || "";
@@ -766,38 +767,87 @@ function openMidiSongEditor(songId) {
   } });
 }
 
+function selectedMidiRows() {
+  return [...document.querySelectorAll('#midiSongList [data-song-id]')].filter(row=>!row.hidden&&row.querySelector('.songRemoveSelect')?.checked);
+}
+
+async function removeMidiRows(rows) {
+  if(!rows.length)throw Error('请先勾选要移除的作品');
+  if(await window.OliviaSoulSongEditor.remove({baseUrl:'/admin/api',ids:rows.map(row=>row.dataset.songId),names:rows.map(row=>row.querySelector('strong').textContent)}))await refreshMidiStatus();
+}
+
+function updateMidiSelection() {
+  const selected=selectedMidiRows(),count=selected.length;
+  $('#midiSelectionSummary').textContent=`共 ${midiStatusSnapshot?.songs?.length||0} 首 · 已选 ${count} 首`;
+  $('#removeSelectedSongs').textContent=`移除所选（${count}）`;
+  $('#removeSelectedSongs').disabled=count===0;
+  for(const row of document.querySelectorAll('#midiSongList [data-song-id]')){
+    const button=row.querySelector('.songRemoveButton'),batch=count>1&&selected.includes(row);
+    button.textContent=batch?`移除所选（${count}）`:'移除';
+    button.title=batch?`移除已选的 ${count} 首作品，不删除原视频`:'从曲库移除此作品，不删除原视频';
+  }
+}
+
 function renderMidiStatus(data) {
   midiStatusSnapshot = data;
-  const dataRoot = data.dataRoot
-    ? `${data.library?.mode === "reference" ? "当前引用目录" : "当前保存目录"}：${data.dataRoot}`
-    : "尚未取得官方作品目录";
+  const dataRoot = data.library?.root ? `最近导入目录：${data.library.root}` : "最近导入目录：尚未导入";
   $("#midiDataRoot").textContent = dataRoot;
   $("#midiDataRoot").title = dataRoot;
+  const sources=data.library?.sources,sourceRoots=Array.isArray(sources?.roots)?sources.roots:[];
+  $('#midiReferencedSummary').textContent=`已引用目录（${sourceRoots.length} 个）`;
+  const sourceList=$('#midiReferencedRoots');sourceList.replaceChildren();
+  for(const root of sourceRoots){const item=document.createElement('li');item.textContent=`${root.path}（关联 ${root.works} 首）`;item.title=root.path;sourceList.append(item);}
+  if(!sourceRoots.length){const item=document.createElement('li');item.textContent='暂无已登记的来源目录';sourceList.append(item);}
+  $('#midiSourceNotice').textContent=Number(sources?.unconfirmedWorks)>0?`${sources.unconfirmedWorks} 首旧作品来源待确认，可重新扫描导入原目录补记来源；不会用最近导入目录替代。`:'';
+  $('#midiWatchNotice').textContent=data.library?.root?'自动监测仅针对最近导入目录；以上为已登记来源，当前可用性未逐一核验。':'尚未设置自动监测目录。';
   const query = $("#midiSongSearch").value.trim().normalize("NFKC").toLocaleLowerCase();
   const list = $("#midiSongList");
   const rows = new Map([...list.querySelectorAll("[data-song-id]")].map(row => [row.dataset.songId, row]));
   const ids = new Set();
   list.querySelector(".empty")?.remove();
+  let previousRow = null;
   for (const song of data.songs) {
     const id = String(song.id); ids.add(id);
     let row = rows.get(id);
     if (!row) {
       row = document.createElement("article"); row.className = "performanceItem"; row.dataset.songId = id;
       const title = document.createElement("strong"), info = document.createElement("span"), edit = document.createElement("button");
+      const select=document.createElement('input');select.type='checkbox';select.className='songRemoveSelect';select.setAttribute('aria-label','选择要移除的作品');
+      select.addEventListener('change',updateMidiSelection);
+      const remove=document.createElement('button');remove.type='button';remove.className='secondary compact songRemoveButton';remove.textContent='移除';
+      remove.addEventListener('click',safely(async event=>{event.stopPropagation();const selected=selectedMidiRows();await removeMidiRows(selected.includes(row)?selected:[row]);}));
       edit.type = "button"; edit.className = "secondary compact songEditButton"; edit.textContent = "名称 / 时段";
       edit.addEventListener("click", event => { event.stopPropagation(); openMidiSongEditor(id); });
-      row.append(title, info, edit); list.append(row);
+      const actions=document.createElement('div');actions.className='songListActions';actions.append(select,edit,remove);row.append(title, info, actions); list.append(row);
     }
     row.querySelector("strong").textContent = song.name;
+    row.querySelector("strong").title = song.name;
     row.querySelector("span").textContent = `完整视频导入${song.durationUs ? ` · ${Math.round(song.durationUs / 1_000_000)} 秒` : ""}`;
     row.hidden = Boolean(query && !String(song.name).normalize("NFKC").toLocaleLowerCase().includes(query));
+    if(row.hidden)row.querySelector('.songRemoveSelect').checked=false;
+    const before = previousRow ? previousRow.nextElementSibling : list.firstElementChild;
+    if (row !== before) list.insertBefore(row, before);
+    previousRow = row;
   }
   for (const [id, row] of rows) if (!ids.has(id)) row.remove();
   if (!data.songs.length) { const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = "还没有本地曲目。"; list.append(empty); }
+  updateMidiSelection();
 }
 
-async function refreshMidiStatus() {
-  renderMidiStatus(await api("/admin/api/midi"));
+let midiRefreshPromise = null, midiRefreshGeneration = 0;
+function refreshMidiStatus() {
+  ++midiRefreshGeneration;
+  if (!midiRefreshPromise) {
+    midiRefreshPromise = (async () => {
+      let generation;
+      do {
+        generation = midiRefreshGeneration;
+        const data = await api("/admin/api/midi");
+        if (generation === midiRefreshGeneration) renderMidiStatus(data);
+      } while (generation !== midiRefreshGeneration);
+    })().finally(() => { midiRefreshPromise = null; });
+  }
+  return midiRefreshPromise;
 }
 
 function renderMidiLibraryPreview(preview) {
@@ -992,6 +1042,9 @@ $("#confirmMidiLibrary").addEventListener("click", safely(async () => {
   }
 }));
 $("#refreshMidiStatus").addEventListener("click", safely(refreshMidiStatus));
+$('#removeSelectedSongs').addEventListener('click',safely(async()=>{
+ await removeMidiRows(selectedMidiRows());
+}));
 $("#refreshStorage").addEventListener("click", safely(async () => {
   storageMigrationPreview = null;
   $("#confirmStorageMigration").disabled = true;
@@ -1165,14 +1218,22 @@ $("#customModel").addEventListener("change", event => {
   $("#customFields").hidden = !event.target.checked;
 });
 $("#autoStart").addEventListener("change", safely(async event => {
+  event.target.disabled = true;
   const requested = event.target.checked;
   try {
     event.target.checked = (await window.oliviaDesktop.setAutoStart(requested)).autoStart;
   } catch (error) {
     event.target.checked = !requested;
     throw error;
+  } finally {
+    event.target.disabled = false;
   }
 }));
+window.chrome?.webview?.addEventListener('message', event => {
+  if (event.data?.type === 'auto-start-settings' && typeof event.data.autoStart === 'boolean') {
+    $("#autoStart").checked = event.data.autoStart;
+  }
+});
 $("#checkUpdate").addEventListener("click", safely(async () => {
   await loadUpdate();
 }));
@@ -1515,7 +1576,15 @@ function showError(error) {
   void openNotice({ title: "操作失败", message: error.message });
 }
 
+void import('./lyrics-settings.js').catch(console.error);
 Promise.all([refresh(), loadDesktopSettings()]).catch(showError);
 // One quiet release check per page load; never downloads or installs automatically.
 void loadUpdate().catch(() => {});
 setInterval(() => refreshStatus().catch(console.error), 5000);
+if (typeof EventSource === 'function') {
+  const libraryEvents = new EventSource('/toy/command-events?channel=library');
+  const refreshLibrary = () => { void refreshMidiStatus().catch(console.error); };
+  libraryEvents.addEventListener('open', refreshLibrary);
+  libraryEvents.addEventListener('library-changed', refreshLibrary);
+  window.addEventListener('pagehide', () => libraryEvents.close(), {once:true});
+}

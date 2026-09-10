@@ -46,6 +46,8 @@ namespace OliviaSoul
   });
   window.oliviaDesktop = {
     getSettings: () => invoke('getSettings', []),
+    getLyricsFonts: () => invoke('getLyricsFonts', []),
+    getLyricsFontInfo: () => invoke('getLyricsFontInfo', []),
     setAutoStart: enabled => invoke('setAutoStart', [enabled]),
     selectClient: () => invoke('selectClient', []),
     selectMediaFile: () => invoke('selectMediaFile', []),
@@ -100,12 +102,20 @@ namespace OliviaSoul
                     case "installUpdate":
                         result = await InstallUpdateAsync(values != null && values.Count > 0 ? Convert.ToString(values[0]) : "");
                         break;
+                    case "getLyricsFonts":
+                        result = LyricsAppearance.InstalledFonts();
+                        break;
+                    case "getLyricsFontInfo":
+                        result = new { fonts = LyricsAppearance.InstalledFonts(), defaultFont = LyricsAppearance.Resolve("auto") };
+                        break;
                     case "getSettings":
                     case "getClientStatus":
                     case "restoreClient":
                         result = await _backend.SendAsync(method);
                         break;
                     case "setAutoStart":
+                        result = await _form.ChangeAutoStartAsync(values != null && values.Count > 0 && Convert.ToBoolean(values[0]));
+                        break;
                     case "mountClient":
                         result = await _backend.SendAsync(method, values != null && values.Count > 0 ? values[0] : null);
                         break;

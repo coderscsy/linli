@@ -139,7 +139,7 @@ small { display: block; color: #77777d; font-size: 11px; margin-top: 2px; }
 }
 .cards span { display: block; color: #83838a; font-size: 11px; margin-bottom: 2px; }
 .cards strong { font-size: 14px; }
-.sideTabs { display: grid; gap: 6px; border-top: 1px solid #292a2f; margin-top: 13px; padding-top: 13px; }
+.sideTabs { display: grid; gap: 6px; border-top: 0; margin-top: 0; padding-top: 0; }
 .sideTab {
   position: relative;
   width: 100%;
@@ -349,7 +349,10 @@ textarea { min-height: 190px; resize: vertical; line-height: 1.6; font-family: C
 .performanceItem span, .mediaPicker span {
   overflow-wrap: anywhere;
 }
-.serviceMountSettings { border-top: 1px solid #303138; margin-top: 22px; padding-top: 18px; }
+.serviceMountSettings { border-top: 0; margin-top: 0; padding-top: 0; }
+.tabPage[data-page="desktop"] > .panelHead { margin-bottom: 12px; padding-bottom: 10px; }
+.serviceMountActions { margin-top: 10px; }
+.serviceMountActions .result:empty { display: none; }
 .serviceMountSettings[hidden] { display: none; }
 .serviceMountHead { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .serviceMountHead > div { display: grid; gap: 5px; }
@@ -561,6 +564,14 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .songEditButton { justify-self: start; width: fit-content; margin-top: 6px; }
 .performanceItem[hidden] { display: none; }
+.performanceItem .songListActions { justify-content:flex-end; flex-wrap:wrap; gap:12px; }
+.songListActions .songRemoveSelect { width:18px; height:18px; margin:0 auto 0 0; }
+.songListActions .songEditButton { margin:0; }
+.librarySourceDetails { min-width:0; margin:0 0 16px; color:#b8b4ae; }
+.librarySourceDetails summary { cursor:pointer; }
+.librarySourceDetails ul { max-height:220px; overflow:auto; margin:10px 0; padding-left:22px; }
+.librarySourceDetails li { padding:4px 0; overflow-wrap:anywhere; white-space:normal; }
+.librarySourceDetails small { display:block; margin-top:8px; line-height:1.6; overflow-wrap:anywhere; }
 /* Update progress uses its own full-width row, including narrow/high-DPI windows. */
 .updateDownloadStatus { display: grid; gap: 8px; min-width: 0; margin-top: 12px; }
 .updateDownloadStatus progress { width: 100%; max-width: 100%; height: 10px; accent-color: #d9d1c4; }

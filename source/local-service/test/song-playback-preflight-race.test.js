@@ -108,7 +108,7 @@ test("a slow play preflight cannot publish early or replace a newer successful p
     assert.equal(newer.data.command.songId, ctx.songs.b.id);
     gate.release();
     assert.notEqual((await pending).code, 0);
-    assert.deepEqual((await ctx.json("/toy/player-command")).data, newer.data);
+    assert.deepEqual((await ctx.json("/toy/player-command")).data, {...newer.data,nativeCommand:null});
     const state = (await ctx.json("/toy/player-state")).data;
     assert.equal(state.songId, ctx.songs.b.id);
     assert.equal(state.sessionId, newer.data.command.sessionId);
@@ -130,7 +130,7 @@ test("stopping the active work invalidates an older pending play preflight", { c
     gate = holdNextStat(ctx.files.a);
     pending = ctx.play(ctx.songs.a);
     await gate.entered();
-    assert.deepEqual((await ctx.json("/toy/player-command")).data, active.data);
+    assert.deepEqual((await ctx.json("/toy/player-command")).data, {...active.data,nativeCommand:null});
     const stopped = await ctx.json("/toy/player-command", {
       cmd: "stop", songId: ctx.songs.b.id, sessionId: active.data.command.sessionId,
     });
@@ -138,7 +138,7 @@ test("stopping the active work invalidates an older pending play preflight", { c
     assert.equal(stopped.data.command.cmd, "stop");
     gate.release();
     assert.notEqual((await pending).code, 0);
-    assert.deepEqual((await ctx.json("/toy/player-command")).data, stopped.data);
+    assert.deepEqual((await ctx.json("/toy/player-command")).data, {...stopped.data,nativeCommand:null});
     const state = (await ctx.json("/toy/player-state")).data;
     assert.equal(state.songId, ctx.songs.b.id);
     assert.equal(state.sessionId, active.data.command.sessionId);

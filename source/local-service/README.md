@@ -1,6 +1,6 @@
 # OliviaSoul 本机服务与桌面宿主
 
-当前用户说明以[完整使用说明](packaging/使用说明.txt)和[仓库 README](../../README.md)为准；本次为 R10.5 稳定性更新，更新标识 `2008.2.7-linli.7`，程序版本 `2008.2.7`。[合并更新说明](packaging/发布说明.md)。
+当前用户说明以[完整使用说明](packaging/使用说明.txt)和[仓库 README](../../README.md)为准；本次为桌面歌词与曲库累计更新，更新标识 `2008.2.7-linli.8`，程序版本 `2008.2.7`，客户端 FE v44 / WebPlayer v18。[合并更新说明](packaging/发布说明.md) · [歌词使用说明](../../docs/LYRICS.md)。
 
 ## 当前架构
 

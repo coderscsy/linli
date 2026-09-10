@@ -107,6 +107,8 @@ function songFromRow(row) {
     correctedName: row.corrected_name ?? null,
     timeOfDayMapping: parseJson(row.time_of_day_mapping, null),
     sourceKind: row.source_kind,
+    sourceRoots: parseJson(row.source_roots, []),
+    removed: row.removed_at != null,
     midiPath: row.midi_path,
     videoPath: row.video_path,
     durationUs: row.duration_us,
@@ -209,7 +211,7 @@ export class MidiStore {
     const songColumns = new Set(this.db.prepare("PRAGMA table_info(user_songs)").all().map(column => column.name));
     if (!songColumns.has("performance_type"))
       this.db.exec("ALTER TABLE user_songs ADD COLUMN performance_type TEXT NOT NULL DEFAULT 'Solo'");
-    for (const column of ["custom_name", "custom_name_key", "corrected_name", "corrected_name_key", "time_of_day_mapping"]) {
+    for (const column of ["custom_name", "custom_name_key", "corrected_name", "corrected_name_key", "time_of_day_mapping", "source_roots", "removed_at"]) {
       if (!songColumns.has(column)) this.db.exec(`ALTER TABLE user_songs ADD COLUMN ${column} TEXT`);
     }
   }
@@ -415,7 +417,10 @@ export class MidiStore {
   }) {
     if (contentHash) {
       const existing = this.db.prepare("SELECT * FROM user_songs WHERE content_hash = ?").get(contentHash);
-      if (existing) return songFromRow(existing);
+      if (existing) {
+        if (externalRoot) this.registerSongSource(existing.id, externalRoot);
+        return this.getUserSong(existing.id, {includeRemoved:true});
+      }
     }
     const songId = id ?? this.randomId();
     const displayName = String(name ?? "").trim();
@@ -459,11 +464,29 @@ export class MidiStore {
     if (correction) this.db.prepare("UPDATE user_songs SET corrected_name = ?, corrected_name_key = ? WHERE id = ?")
       .run(correction.corrected_name, correction.corrected_name.normalize("NFKC").toLocaleLowerCase(), songId);
     this.#bumpLibraryRevision();
+    if (externalRoot) this.registerSongSource(songId, externalRoot);
     return this.getUserSong(songId);
   }
 
-  getUserSong(id) {
-    return songFromRow(this.db.prepare("SELECT * FROM user_songs WHERE id = ?").get(id));
+  registerSongSource(id, root) {
+    if (typeof root !== 'string' || !isAbsolute(root)) fail('LIBRARY_PATH_INVALID', '导入目录必须是绝对路径');
+    const song = this.getUserSong(id, {includeRemoved:true});
+    if (!song) fail('MIDI_SONG_NOT_FOUND', 'Song does not exist');
+    const normalized = resolve(root), roots = song.sourceRoots;
+    const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+    if (!roots.some(value => key(value) === key(normalized))) {
+      this.db.prepare('UPDATE user_songs SET source_roots=? WHERE id=?').run(JSON.stringify([...roots, normalized]), id);
+    }
+  }
+
+  listLibraryRoots() {
+    const roots = this.db.prepare('SELECT DISTINCT source_roots FROM user_songs WHERE source_roots IS NOT NULL').all()
+      .flatMap(row => parseJson(row.source_roots, []));
+    return [...new Set(roots)];
+  }
+
+  getUserSong(id, {includeRemoved=false} = {}) {
+    return songFromRow(this.db.prepare(`SELECT * FROM user_songs WHERE id = ? ${includeRemoved ? '' : 'AND removed_at IS NULL'}`).get(id));
   }
 
   updateUserSongMetadata(id, patch, correctionFingerprints = []) {
@@ -543,15 +566,16 @@ export class MidiStore {
     });
   }
 
-  listUserSongs(query = "") {
+  listUserSongs(query = "", {includeRemoved=false} = {}) {
     const nameKey = String(query ?? "").trim().normalize("NFKC").toLocaleLowerCase();
     const rows = nameKey
       ? this.db.prepare(`
           SELECT * FROM user_songs
           WHERE instr(COALESCE(custom_name_key, corrected_name_key, name_key), ?) > 0
+          ${includeRemoved ? '' : 'AND removed_at IS NULL'}
           ORDER BY created_at DESC, rowid DESC
         `).all(nameKey)
-      : this.db.prepare("SELECT * FROM user_songs ORDER BY created_at DESC, rowid DESC").all();
+      : this.db.prepare(`SELECT * FROM user_songs ${includeRemoved ? '' : 'WHERE removed_at IS NULL'} ORDER BY created_at DESC, rowid DESC`).all();
     return rows.map(songFromRow);
   }
 
@@ -563,7 +587,7 @@ export class MidiStore {
     const limit = Math.min(100, Math.max(1, Number(pageSize) || 100));
     const nameKey = String(query ?? "").trim().normalize("NFKC").toLocaleLowerCase();
     const position = decodeCursor(cursor);
-    const filters = ["source_kind <> 'upload'", "job_id IS NULL"];
+    const filters = ["source_kind <> 'upload'", "job_id IS NULL", "removed_at IS NULL"];
     const parameters = [];
     if (nameKey) {
       filters.push("instr(COALESCE(custom_name_key, corrected_name_key, name_key), ?) > 0");
@@ -579,7 +603,7 @@ export class MidiStore {
       ORDER BY created_at DESC, rowid DESC
       LIMIT ?
     `).all(...parameters, limit + 1);
-    const countFilters = ["source_kind <> 'upload'", "job_id IS NULL"];
+    const countFilters = ["source_kind <> 'upload'", "job_id IS NULL", "removed_at IS NULL"];
     const countParameters = [];
     if (nameKey) {
       countFilters.push("instr(COALESCE(custom_name_key, corrected_name_key, name_key), ?) > 0");
@@ -622,5 +646,17 @@ export class MidiStore {
     const deleted = Number(this.db.prepare("DELETE FROM user_songs WHERE id = ?").run(id).changes) > 0;
     if (deleted) this.#bumpLibraryRevision();
     return deleted;
+  }
+
+  removeUserSong(id) {
+    const changed=Number(this.db.prepare('UPDATE user_songs SET removed_at=? WHERE id=? AND removed_at IS NULL').run(this.now(),id).changes)>0;
+    if(changed)this.#bumpLibraryRevision();
+    return changed;
+  }
+
+  restoreUserSong(id) {
+    const changed=Number(this.db.prepare('UPDATE user_songs SET removed_at=NULL WHERE id=? AND removed_at IS NOT NULL').run(id).changes)>0;
+    if(changed)this.#bumpLibraryRevision();
+    return this.getUserSong(id);
   }
 }

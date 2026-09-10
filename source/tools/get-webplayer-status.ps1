@@ -27,8 +27,12 @@ finally {
     $stream.Dispose()
 }
 
-$patchMarker = '/*OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14*/'
+$patchMarker = '/*OliviaSoulPatch:webplayer-instant-seamless-v18*/'
 $legacyPatchMarkers = @(
+    '/*OliviaSoulPatch:webplayer-lyrics-wallpaper-pause-v16*/',
+    '/*OliviaSoulPatch:webplayer-instant-seamless-v17*/',
+    '/*OliviaSoulPatch:webplayer-lyrics-pause-bounded-progress-v15*/',
+    '/*OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14*/',
     '/*OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13*/',
     '/*OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v12*/',
     '/*OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v11*/',

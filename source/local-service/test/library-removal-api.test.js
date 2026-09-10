@@ -1,0 +1,46 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createOliviaService} from '../server.js';
+
+test('removal validates atomically, stops only affected playback and preserves files and lyrics for restore',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'library-remove-'));
+ const service=await createOliviaService({root,dataDir:join(root,'data'),appData:join(root,'app'),worker:false,runMemoryRefresh:false,midiDurationProbe:async()=>1000000,fetch:async()=>{throw Error('offline');}});
+ t.after(async()=>{await service.close();await rm(root,{recursive:true,force:true});});
+ const {port}=await service.listen(0,'127.0.0.1'),base=`http://127.0.0.1:${port}`;
+ const json=async(path,body)=>(await fetch(base+path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})).json();
+ await mkdir(service.midiStore.root,{recursive:true});
+ for(const id of ['a','b']){const path=join(service.midiStore.root,id+'.mp4');await writeFile(path,'media');service.midiStore.upsertUserSong({id,name:id,sourceKind:'import',videoPath:path,videoByTodView:{DEFAULT:path}});}
+ await json('/toy/media/songs/a/lyrics',{variant:'DEFAULT',filename:'a.lrc',offsetMs:80,contentBase64:Buffer.from('[00:00]hello').toString('base64')});
+ assert.equal((await json('/toy/addToPlaylist',{itemType:3,itemId:'a',name:'a'})).code,0);
+ assert.equal((await json('/toy/addToPlaylist',{itemType:2,itemId:'official-other',name:'official'})).code,0);
+ const play=(await json('/toy/player-command',{cmd:'play',songId:'a',url:base+'/toy/midi/songs/a/video.mp4'})).data;
+ const stream=await fetch(base+'/toy/command-events?channel=lyrics');
+ const reader=stream.body.getReader();await reader.read();t.after(()=>reader.cancel());
+ assert.notEqual((await json('/admin/api/media/songs/remove',{ids:['a','unknown']})).code,0);
+ assert.ok(service.midiStore.getUserSong('a'));
+ assert.equal((await json('/admin/api/media/songs/remove',{ids:['b']})).code,0);
+ const notice=await Promise.race([reader.read(),new Promise(resolve=>setTimeout(()=>resolve(null),500))]);
+ assert.ok(notice,'management removal must push an immediate game notification');
+ assert.match(new TextDecoder().decode(notice.value),/event: library-removed/);
+ assert.match(new TextDecoder().decode(notice.value),/"b"/);
+ assert.equal((await json('/toy/player-state')).data.sessionId,play.command.sessionId);
+ assert.equal((await json('/toy/player-state')).data.playbackState,'playing');
+ await rm(join(service.midiStore.root,'b.mp4'));
+ assert.equal((await json('/toy/media/songs/remove',{ids:['b']})).code,0,'already removed work remains removable if the source is physically gone');
+ const removedA=await json('/toy/media/songs/remove',{ids:['a']});
+ assert.equal(removedA.code,0);
+ assert.equal(removedA.data.counts?.libraryTotal,0);
+ assert.equal(removedA.data.counts?.playlistTotal,1);
+ assert.equal((await json('/toy/player-state')).data.playbackState,'stopped');
+ assert.equal((await json('/toy/player-command')).data.command.restoreDefault,true);
+ assert.equal((await json('/toy/searchUserSongs')).data.total,0);
+ assert.deepEqual((await json('/toy/searchPlaylist')).data.list.map(item=>item.itemId),['official-other']);
+ assert.equal(await readFile(join(service.midiStore.root,'a.mp4'),'utf8'),'media');
+ assert.equal((await json('/toy/media/songs/remove',{ids:['a']})).code,0);
+ service.midiStore.restoreUserSong('a');
+ const binding=(await json('/toy/media/songs/a/lyrics')).data.variants[0];
+ assert.equal(binding.bound,true);assert.equal(binding.offsetMs,80);
+});

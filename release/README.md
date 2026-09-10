@@ -1,4 +1,16 @@
-# R10.5 曲目路径识别修复
+# linli.8 桌面歌词与曲库累计更新
+
+更新标识：`2008.2.7-linli.8`；程序版本：`2008.2.7`；FE v44 / WebPlayer v18；日期：2026-09-10。
+
+从 [linli.8 Release](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.8) 下载完整安装包、便携包和对应的 `SHA256SUMS.txt`。可执行文件不提交进 Git。
+
+- 新增桌面歌词、独立设置、多版本共用 LRC/独立偏移、歌词播放控制及曲库移除。
+- 修复导入后前后台列表刷新、移除播放中作品后续播和进度异常、多目录来源与单作品多视频识别。
+- 升级前退出游戏和托盘程序并备份 UserData；升级后更新游戏补丁至 FE v44 / WebPlayer v18。
+- [更新说明](../source/local-service/packaging/发布说明.md) · [构建验证记录](linli.8-build.md) · [本版校验值](linli.8-SHA256SUMS.txt)。
+- 本目录原有 `SHA256SUMS.txt` 是历史版本记录，不能用于校验 linli.8；下载时以对应 Release 附件为准。
+
+## R10.5 历史更新：曲目路径识别修复
 
 更新标识：`2008.2.7-linli.7`；程序版本：`2008.2.7`；发布日期：2026-09-08。
 

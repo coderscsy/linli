@@ -21,6 +21,7 @@ static class Application {
     public static void Exit() { Exits++; }
 }
 class Tray { public bool Visible = true; public int Notices; public void ShowBalloonTip(int a, string b, string c, ToolTipIcon d) { Notices++; } }
+class LyricsLifecycle { public int Disposals; public void Dispose() { Disposals++; } }
 class Backend {
     public TaskCompletionSource<object> Pending = new TaskCompletionSource<object>();
     public int Stops;
@@ -55,6 +56,7 @@ class MainForm {
     bool _quitting, _shutdownComplete, _trayNoticeShown, _hiddenAtLaunch, _backendReady;
     readonly Paths _paths = new Paths();
     public readonly Backend _backend = new Backend();
+    public readonly LyricsLifecycle _lyrics = new LyricsLifecycle();
     public readonly Tray _tray = new Tray();
     public bool IsDisposed, Visible = true, ShowInTaskbar = true;
     /* IS_QUITTING */
@@ -118,6 +120,7 @@ class Program {
             Case("repeated quit does not stop twice or dispose early", () => {
                 var form = new MainForm(); form.RequestQuit(); form.RequestQuit(); form.Close();
                 Check(form._backend.Stops == 1, "cleanup must run once");
+                Check(form._lyrics.Disposals == 1, "lyrics must be released before backend shutdown completes");
                 Check(!form.IsDisposed && form.FinalCloses == 0, "manual close must not dispose during cleanup");
                 form._backend.Pending.SetResult(null); context.Drain();
                 Check(form.FinalCloses == 1, "one final close");

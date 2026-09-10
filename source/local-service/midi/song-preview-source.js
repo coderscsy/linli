@@ -47,6 +47,7 @@ function cachedFaststartPath(path, contentHash, variantKey) {
 export function createSongPreviewResolver({
   resolvePath,
   getLibraryRoot,
+  getLibraryRoots = () => [],
   scanLibrary = scanPerformanceLibrary,
   hashFile = sha256File,
   now = () => Date.now(),
@@ -55,7 +56,7 @@ export function createSongPreviewResolver({
   const activeHashes = new Set();
   const activeHashTasks = new Set();
   const lifetime = new AbortController();
-  let index = null;
+  const indexes = new Map();
   function ensureActive(signal) {
     if (lifetime.signal.aborted || signal?.aborted) throw aborted();
   }
@@ -114,6 +115,7 @@ export function createSongPreviewResolver({
     const currentSignature = await librarySignature(root);
     ensureActive();
     const currentTime = now();
+    let index = indexes.get(root);
     if (index?.signature !== currentSignature || currentTime - index.checkedAt >= MAX_INDEX_AGE_MS) {
       const promise = (async () => {
         const preview = await scanLibrary(root);
@@ -122,7 +124,9 @@ export function createSongPreviewResolver({
       })();
       index = { signature: currentSignature, checkedAt: currentTime, promise };
       const current = index;
-      current.promise.catch(() => { if (index === current) index = null; });
+      if (!indexes.has(root) && indexes.size >= 8) indexes.delete(indexes.keys().next().value);
+      indexes.set(root, index);
+      current.promise.catch(() => { if (indexes.get(root) === current) indexes.delete(root); });
     }
     return index.promise;
   }
@@ -133,15 +137,21 @@ export function createSongPreviewResolver({
     if (!selected) throw unavailable();
     const direct = resolvePath(selected.path);
     if (direct && (!originalSource || !cachedFaststartPath(direct, song.contentHash, selected.key)) && await waitFor(fileInfo(direct), signal)) return direct;
-    const configured = String(getLibraryRoot() ?? "").trim();
-    if (!configured || !/^[a-f0-9]{64}$/u.test(song.contentHash ?? "")) throw unavailable();
-    try {
+    const ownRoots = Array.isArray(song.sourceRoots) ? song.sourceRoots : [];
+    const roots = [...new Set([...(ownRoots.length ? ownRoots : getLibraryRoots()), getLibraryRoot()]
+      .filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
+    if (!roots.length || !/^[a-f0-9]{64}$/u.test(song.contentHash ?? "")) throw unavailable();
+    const verified = [];
+    for (const configured of roots) try {
       const root = await waitFor(realpath(configured), signal);
       const preview = await waitFor(libraryIndex(root), signal);
       const expectedKeys = registered.map(item => item.key).sort();
       const names = new Set([song.originalName, song.name].filter(value => typeof value === "string" && value.trim()));
-      const candidates = preview.entries.filter(entry => names.has(entry.name));
-      const verified = [];
+      // A verified reimport may register a renamed single-work directory while
+      // intentionally preserving the user's title. Its full variant-set hash,
+      // not that old title, must decide the match. Keep legacy matching narrow.
+      const renamedSingleWork = song.sourceKind === "official-import" && ownRoots.includes(configured) && preview.entries.length === 1;
+      const candidates = preview.entries.filter(entry => names.has(entry.name) || renamedSingleWork);
       for (const entry of candidates) {
         const variants = Object.entries(entry.videoByTodView ?? {});
         if (JSON.stringify(variants.map(([key]) => key).sort()) !== JSON.stringify(expectedKeys)) continue;
@@ -169,9 +179,9 @@ export function createSongPreviewResolver({
         }
         if (matched) verified.push(files.get(variantKey).path);
       }
-      if (new Set(verified).size !== 1) throw unavailable();
-      return verified[0];
-    } catch { ensureActive(signal); throw unavailable(); }
+    } catch { ensureActive(signal); }
+    if (new Set(verified).size !== 1) throw unavailable();
+    return verified[0];
   }
   resolvePreview.sourceFingerprint = async (song, variantKey, { signal } = {}) => {
     const path = await resolvePreview(song, variantKey, { originalSource: true, signal });
@@ -182,7 +192,7 @@ export function createSongPreviewResolver({
     return { path, sha256 };
   };
   resolvePreview.invalidate = () => {
-    index = null;
+    indexes.clear();
     hashes.clear();
   };
   resolvePreview.close = () => {

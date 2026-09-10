@@ -39,7 +39,7 @@ if ($mainFiles.Count -ne 1) { throw "expected one main-*.js, got $($mainFiles.Co
 $utf8 = New-Object System.Text.UTF8Encoding $false
 $mainPath = $mainFiles[0].FullName
 $text = [IO.File]::ReadAllText($mainPath, $utf8)
-$patchMarker = '/*OliviaSoulPatch:mail-music-v32*/'
+$patchMarker = '/*OliviaSoulPatch:mail-music-v44*/'
 if ($text.Contains($patchMarker)) { throw "original feapp already contains current patch" }
 $text = $patchMarker + $text
 $playerCommandUrl = $ServiceUrl.TrimEnd("/") + "/toy/player-command"
@@ -50,16 +50,53 @@ if (-not (Test-Path -LiteralPath $songEditorSourcePath -PathType Leaf)) { throw 
 $songEditorSource = [IO.File]::ReadAllText($songEditorSourcePath, $utf8)
 $songEditorBase = $ServiceUrl.TrimEnd("/") + "/toy"
 $songEditorBridge = @'
+(()=>{const s=document.createElement("script");s.charset="utf-8";s.src="__OLIVIA_SONG_EDITOR_BASE__/../admin/game-lyrics.js";document.head.appendChild(s)})();
 function OliviaSoulEditSong(song){
   if(!String(song&&song.videoUrl||"").includes("/toy/midi/songs/"))return;
   return window.OliviaSoulSongEditor.open({baseUrl:"__OLIVIA_SONG_EDITOR_BASE__",songId:window.OliviaSoulSongEditor.stableId(song)});
+}
+function OliviaSoulRemoveSong(song){
+  if(!String(song&&song.videoUrl||'').includes('/toy/midi/songs/'))return;
+  return window.OliviaSoulSongEditor.remove({baseUrl:'__OLIVIA_SONG_EDITOR_BASE__',ids:[window.OliviaSoulSongEditor.stableId(song)],names:[song.name]});
 }
 '@
 $songEditorBridge = $songEditorBridge.Replace('__OLIVIA_SONG_EDITOR_BASE__', $songEditorBase)
 $songTitleSync = @'
 function OliviaSoulApplySongMetadata(metadata){window.OliviaSoulSongEditor.applyMetadata([...x.value,u.value,f.value],metadata)}
 let OliviaSoulTitleBusy=false,OliviaSoulTitleEpoch=0;
+function OliviaSoulClearLocalPlayback(){
+  window.__OliviaSoulStoppedPlayback=null;
+  window.__OliviaSoulSongId=null;window.__OliviaSoulSessionId=null;window.__OliviaSoulCommandRevision=null;window.__OliviaSoulEndingSessionId=null;window.__OliviaSoulPendingPlay=null;
+  window.__OliviaSoulSessionEpoch=Number(window.__OliviaSoulSessionEpoch||0)+1;
+  window.__OliviaSoulApplyingProgress=true;
+  try{G();}finally{queueMicrotask(()=>{window.__OliviaSoulApplyingProgress=false;});}
+}
+window.OliviaSoulLocalPlaybackFailed=({songId,epoch,error})=>{
+  if(String(window.__OliviaSoulSongId||'')!==String(songId)||Number(window.__OliviaSoulSessionEpoch||0)!==epoch)return;
+  OliviaSoulClearLocalPlayback();
+  window.OliviaSoulSongEditor.notify(window.OliviaSoulSongEditor.playbackMessage(error));
+};
 window.addEventListener("oliviasoul-song-metadata",event=>{OliviaSoulTitleEpoch++;OliviaSoulApplySongMetadata(event.detail)});
+function OliviaSoulForgetRemoved(ids){
+  OliviaSoulTitleEpoch++;
+  const removed=item=>item&&String(item.videoUrl||'').includes('/toy/midi/songs/')&&ids.includes(window.OliviaSoulSongEditor.stableId(item));
+  const current=u.value||f.value,activeRemoved=removed(u.value)||removed(f.value);
+  const stopped=window.__OliviaSoulStoppedPlayback;
+  const wasPlaying=m.value||stopped&&stopped.songId===window.__OliviaSoulSongId&&stopped.sessionId===window.__OliviaSoulSessionId&&stopped.playing;
+  const index=x.value.findIndex(item=>current&&window.OliviaSoulSongEditor.stableId(item)===window.OliviaSoulSongEditor.stableId(current));
+  const ordered=index<0?x.value:[...x.value.slice(index+1),...x.value.slice(0,index)];
+  const next=activeRemoved&&wasPlaying?ordered.find(item=>!removed(item)&&a(item)):null;
+  x.value=x.value.filter(item=>!removed(item));
+  if(activeRemoved){
+    OliviaSoulClearLocalPlayback();
+    if(next)void M(next);
+  }
+}
+function OliviaSoulCaptureStoppedPlayback(state){
+  if(state.playbackState!=='stopped'){window.__OliviaSoulStoppedPlayback=null;return;}
+  if(!window.__OliviaSoulStoppedPlayback)window.__OliviaSoulStoppedPlayback={songId:window.__OliviaSoulSongId,sessionId:window.__OliviaSoulSessionId,playing:m.value};
+}
+window.addEventListener('oliviasoul-songs-removed',event=>OliviaSoulForgetRemoved(event.detail.ids));
 setInterval(async()=>{
   if(OliviaSoulTitleBusy)return;
   const records=[u.value,f.value,...x.value].filter(item=>String(item&&item.videoUrl||"").includes("/toy/midi/songs/"));
@@ -68,6 +105,7 @@ setInterval(async()=>{
   try{for(let index=0;index<ids.length;index+=4)await Promise.all(ids.slice(index,index+4).map(async id=>{
     try{const response=await fetch("__OLIVIA_SONG_EDITOR_BASE__/media/songs/"+encodeURIComponent(id)+"/metadata",{cache:"no-store"}),body=await response.json();
       if(response.ok&&Number(body&&body.code)===0&&String(body.data&&body.data.id)===id&&epoch===OliviaSoulTitleEpoch)OliviaSoulApplySongMetadata(body.data);
+      else if(response.status===404&&body.code==='MIDI_SONG_NOT_FOUND')OliviaSoulForgetRemoved([id]);
     }catch{}
   }))}finally{OliviaSoulTitleBusy=false}
 },5000);
@@ -113,6 +151,9 @@ $directControlFrom = 'Ct=e=>We({action:"sendWebPlayerControlCmd",data:e})'
 $directControlTo = 'Ct=e=>{const t=window.__OliviaSoulSongId,s=e&&e.cmd==="pause"?{...e,cmd:"stop"}:e,o=String(window.__OliviaSoulSessionId||"");if(s.cmd==="timeupdate"&&window.__OliviaSoulApplyingProgress)return Promise.resolve();if(!t)return We({action:"sendWebPlayerControlCmd",data:s});let r=null,h=!1;const n=Number(window.__OliviaSoulSessionEpoch||0);if(s.cmd==="timeupdate")window.__OliviaSoulSeekingUntil=Date.now()+800,r={cmd:"seek",offset:s.position,songId:t,sessionId:o};else if(s.cmd==="play"&&s.song&&String(s.song.id)===String(t))window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,r={cmd:"play",url:s.song.videoUrl,songId:String(s.song.id),name:s.song.name};else if(["stop","resume"].includes(s.cmd))r={cmd:s.cmd,songId:t,sessionId:o};else if(s.cmd==="setVolume")r={cmd:"setVolume",volume:s.data&&s.data.muted?0:Number(s.data&&s.data.mainVolume)||0,songId:t,sessionId:o};else if(s.cmd==="play"&&s.song&&String(s.song.id)!==String(t)){const i={cmd:"stop",songId:t,sessionId:o,restoreDefault:!1};return window.__OliviaSoulSongId=null,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,window.__OliviaSoulSessionEpoch=n+1,fetch("' + $playerCommandUrl + '",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(i)}).catch(()=>null).then(()=>We({action:"sendWebPlayerControlCmd",data:s}))}if(!r)return We({action:"sendWebPlayerControlCmd",data:s});const p=window.__OliviaSoulPendingPlay,g=()=>{const l=Number(window.__OliviaSoulSessionEpoch||0),a=String(window.__OliviaSoulSongId||"");return window.__OliviaSoulPendingPlay===p&&(l===n&&a===String(t)||l===n+1&&!a&&!window.__OliviaSoulSessionId)},u=l=>new Promise((a,d)=>{const f=setTimeout(()=>d(new Error("local player request timeout")),1500);Promise.resolve(l).then(v=>{clearTimeout(f),a(v)},v=>{clearTimeout(f),d(v)})}),c=s.cmd==="stop"&&!o&&p&&p.songId===String(t)&&p.epoch===n?u(p.promise).catch(async()=>{if(!g())throw new Error("local player session changed");const l=await u(fetch("' + $playerStateUrl + '",{cache:"no-store"}));if(!l.ok)throw new Error("local player state unavailable");const a=await u(l.json()),d=a&&a.data||a;if(!g()||Number(a&&a.code)!==0||String(d&&d.songId)!==String(t)||typeof(d&&d.sessionId)!=="string"||!d.sessionId.trim())throw new Error("local player session unavailable");return h=!0,{command:{sessionId:d.sessionId}}}).then(l=>{const a=String(l&&l.command&&l.command.sessionId||"");if(!a)throw new Error("local player session unavailable");return{...r,sessionId:a}}):null,b=l=>{if(h&&!g())return Promise.reject(new Error("local player session changed"));return fetch("' + $playerCommandUrl + '",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(l)})},i=(c?c.then(b):b(r)).then(l=>{if(!l.ok)throw new Error("local player command failed");return l.json()}).then(l=>{if(Number(l&&l.code)!==0)throw new Error(l&&l.message||"local player command failed");const a=l&&l.data||l;if(Number(window.__OliviaSoulSessionEpoch||0)===n&&String(window.__OliviaSoulSongId)===String(t))window.__OliviaSoulCommandRevision=a.revision,window.__OliviaSoulSessionId=a.command&&a.command.sessionId||window.__OliviaSoulSessionId;return a});return r.cmd==="play"&&(window.__OliviaSoulPendingPlay={songId:String(t),epoch:n,promise:i}),s.cmd==="stop"&&We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),i}'
 $directControlCount = ([regex]::Matches($text, [regex]::Escape($directControlFrom))).Count
 if ($directControlCount -ne 1) { throw "expected one webplayer control bridge, got $directControlCount" }
+$directControlTo = $directControlTo.Replace('Ct=e=>{', 'Ct=e=>{if(e&&e.cmd==="play"){window.__OliviaSoulNativePlayEpoch=Number(window.__OliviaSoulNativePlayEpoch||0)+1;window.__OliviaSoulNativeProgressAt=0;}')
+$directControlTo = $directControlTo.Replace('then(l=>{if(!l.ok)throw new Error("local player command failed");return l.json()})','then(async l=>{const body=await l.json();if(!l.ok)throw new Error(body.message||"本地播放失败");return body})')
+$directControlTo = $directControlTo.Replace('return r.cmd==="play"', 'i.catch(error=>{if(r.cmd==="play")window.OliviaSoulLocalPlaybackFailed?.({songId:t,epoch:n,error});else if(String(window.__OliviaSoulSongId||"")===String(t)&&Number(window.__OliviaSoulSessionEpoch||0)===n)window.OliviaSoulSongEditor.notify(window.OliviaSoulSongEditor.playbackMessage(error));});return r.cmd==="play"')
 $text = $text.Replace($directControlFrom, $directControlTo)
 
 $songlistProgressFrom = 'source:"songlist",eventId:Ee},h.value="songlist"'
@@ -128,10 +169,16 @@ if ($toggleLocalCount -ne 1) { throw "expected one songlist play toggle, got $to
 $text = $text.Replace($toggleLocalFrom, $toggleLocalTo)
 
 $playerStateStoreFrom = 'Ge=()=>{m.value&&z(),G(),h.value="playlist",x.value=[],I.value=[]};return{isSongAvailable:a'
-$playerStateStoreTo = 'Ge=()=>{m.value&&z(),G(),h.value="playlist",x.value=[],I.value=[]},OliviaSoulFinishLocalPlayback=async B=>{const K=Number(window.__OliviaSoulSessionEpoch||0),W=String(window.__OliviaSoulSongId||""),ue=String(B.sessionId||"");if(!W||String(B.songId)!==W||window.__OliviaSoulEndingSessionId===ue)return;window.__OliviaSoulEndingSessionId=ue;const re=h.value==="songlist";let ye=!1;try{const Ee=await fetch("' + $playerCommandUrl + '",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cmd:"stop",songId:W,sessionId:ue,restoreDefault:re})}),ee=await Ee.json();ye=Ee.ok&&Number(ee&&ee.code)===0}catch{}if(Number(window.__OliviaSoulSessionEpoch||0)!==K||String(window.__OliviaSoulSongId||"")!==W){window.__OliviaSoulEndingSessionId===ue&&(window.__OliviaSoulEndingSessionId=null);return}if(!ye)return We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),window.__OliviaSoulSongId=null,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,window.__OliviaSoulSessionEpoch=K+1,G();re&&We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),window.__OliviaSoulSongId=null,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,window.__OliviaSoulSessionEpoch=K+1;if(re){G();return}window.__OliviaSoulApplyingProgress=!0,d.value=0;queueMicrotask(()=>{window.__OliviaSoulApplyingProgress=!1});const Le=u.value&&u.value.itemId;p.value===ot.Single&&u.value&&a(u.value)?M(u.value):U(),queueMicrotask(()=>{Number(window.__OliviaSoulSessionEpoch||0)===K+1&&!window.__OliviaSoulSongId&&!m.value&&u.value&&u.value.itemId===Le&&(We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),G())})},OliviaSoulApplyPlayerState=B=>{if(String(B.songId)!==String(window.__OliviaSoulSongId)||String(B.sessionId)!==String(window.__OliviaSoulSessionId))return;const OliviaSoulDuration=Number(B.duration);if(Number.isFinite(OliviaSoulDuration)&&OliviaSoulDuration>0)for(const OliviaSoulItem of [u.value,f.value])OliviaSoulItem&&window.OliviaSoulSongEditor.stableId(OliviaSoulItem)===String(B.songId)&&(OliviaSoulItem.duration=OliviaSoulDuration,OliviaSoulItem.videoDuration=OliviaSoulDuration);if(B.playbackState==="ended"){if(window.__OliviaSoulEndingSessionId===String(B.sessionId||""))return;w("natural_end"),m.value=!1,OliviaSoulFinishLocalPlayback(B);return}d.value=Number(B.currentTime)||0,m.value=B.playbackState==="playing"},OliviaSoulEnsurePlayerPoll=()=>{window.__OliviaSoulProgressPoll||(window.__OliviaSoulProgressPoll=setInterval(async()=>{if(!window.__OliviaSoulSongId||!window.__OliviaSoulSessionId||window.__OliviaSoulProgressPending)return;window.__OliviaSoulProgressPending=!0;const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),1500);try{const B=await fetch("' + $playerStateUrl + '",{cache:"no-store",signal:controller.signal}),K=await B.json(),W=K&&K.data||K;W&&W.songId===window.__OliviaSoulSongId&&W.commandRevision===window.__OliviaSoulCommandRevision&&W.sessionId===window.__OliviaSoulSessionId&&Date.now()>Number(window.__OliviaSoulSeekingUntil||0)&&(window.__OliviaSoulApplyingProgress=!0,OliviaSoulApplyPlayerState(W),queueMicrotask(()=>{window.__OliviaSoulApplyingProgress=!1}))}catch{}finally{clearTimeout(timer),window.__OliviaSoulProgressPending=!1}},250))},OliviaSoulSongIdFromItem=B=>{const K=String(B&&B.videoUrl||""),W=K.match(/\/toy\/midi\/songs\/([^\/?#]+)/);return W?decodeURIComponent(W[1]):String(B&&(B.songId||B.id||B.itemId)||"")},OliviaSoulBeginLocalPlayback=B=>{const K=OliviaSoulSongIdFromItem(B);return window.__OliviaSoulSessionEpoch=Number(window.__OliviaSoulSessionEpoch||0)+1,window.__OliviaSoulSongId=K,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,d.value=0,m.value=!0,OliviaSoulEnsurePlayerPoll(),K};return{isSongAvailable:a'
+$playerStateStoreTo = 'Ge=()=>{m.value&&z(),G(),h.value="playlist",x.value=[],I.value=[]},OliviaSoulFinishLocalPlayback=async B=>{const K=Number(window.__OliviaSoulSessionEpoch||0),W=String(window.__OliviaSoulSongId||""),ue=String(B.sessionId||"");if(!W||String(B.songId)!==W||window.__OliviaSoulEndingSessionId===ue)return;window.__OliviaSoulEndingSessionId=ue;const re=h.value==="songlist";let ye=!1;try{const Ee=await fetch("' + $playerCommandUrl + '",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cmd:"stop",songId:W,sessionId:ue,restoreDefault:re})}),ee=await Ee.json();ye=Ee.ok&&Number(ee&&ee.code)===0}catch{}if(Number(window.__OliviaSoulSessionEpoch||0)!==K||String(window.__OliviaSoulSongId||"")!==W){window.__OliviaSoulEndingSessionId===ue&&(window.__OliviaSoulEndingSessionId=null);return}if(!ye)return We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),window.__OliviaSoulSongId=null,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,window.__OliviaSoulSessionEpoch=K+1,G();re&&We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),window.__OliviaSoulSongId=null,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,window.__OliviaSoulSessionEpoch=K+1;if(re){G();return}window.__OliviaSoulApplyingProgress=!0,d.value=0;queueMicrotask(()=>{window.__OliviaSoulApplyingProgress=!1});const Le=u.value&&u.value.itemId;p.value===ot.Single&&u.value&&a(u.value)?M(u.value):U(),queueMicrotask(()=>{Number(window.__OliviaSoulSessionEpoch||0)===K+1&&!window.__OliviaSoulSongId&&!m.value&&u.value&&u.value.itemId===Le&&(We({action:"sendWebPlayerControlCmd",data:{cmd:"stop"}}).catch(()=>{}),G())})},OliviaSoulApplyPlayerState=B=>{if(String(B.songId)!==String(window.__OliviaSoulSongId)||String(B.sessionId)!==String(window.__OliviaSoulSessionId))return;const OliviaSoulDuration=Number(B.duration);if(Number.isFinite(OliviaSoulDuration)&&OliviaSoulDuration>0)for(const OliviaSoulItem of [u.value,f.value])OliviaSoulItem&&window.OliviaSoulSongEditor.stableId(OliviaSoulItem)===String(B.songId)&&(OliviaSoulItem.duration=OliviaSoulDuration,OliviaSoulItem.videoDuration=OliviaSoulDuration);if(B.playbackState==="ended"){if(window.__OliviaSoulEndingSessionId===String(B.sessionId||""))return;w("natural_end"),m.value=!1,OliviaSoulFinishLocalPlayback(B);return}d.value=Number(B.currentTime)||0,m.value=B.playbackState==="playing"},OliviaSoulEnsurePlayerPoll=()=>{window.__OliviaSoulProgressPoll||(window.__OliviaSoulProgressPoll=setInterval(async()=>{if(!window.__OliviaSoulSongId||!window.__OliviaSoulSessionId||window.__OliviaSoulProgressPending)return;window.__OliviaSoulProgressPending=!0;const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),1500);try{const B=await fetch("' + $playerStateUrl + '",{cache:"no-store",signal:controller.signal}),K=await B.json(),W=K&&K.data||K;W&&W.songId===window.__OliviaSoulSongId&&W.commandRevision===window.__OliviaSoulCommandRevision&&W.sessionId===window.__OliviaSoulSessionId&&Date.now()>Number(window.__OliviaSoulSeekingUntil||0)&&(window.__OliviaSoulApplyingProgress=!0,OliviaSoulApplyPlayerState(W),queueMicrotask(()=>{window.__OliviaSoulApplyingProgress=!1}))}catch{}finally{clearTimeout(timer),window.__OliviaSoulProgressPending=!1}},250))},OliviaSoulSongIdFromItem=B=>{const K=String(B&&B.videoUrl||""),W=K.match(/\/toy\/midi\/songs\/([^\/?#]+)/);return W?decodeURIComponent(W[1]):String(B&&(B.songId||B.id||B.itemId)||"")},OliviaSoulBeginLocalPlayback=B=>{const K=OliviaSoulSongIdFromItem(B);return window.__OliviaSoulSessionEpoch=Number(window.__OliviaSoulSessionEpoch||0)+1,window.__OliviaSoulSongId=K,window.__OliviaSoulCommandRevision=null,window.__OliviaSoulSessionId=null,window.__OliviaSoulEndingSessionId=null,d.value=0,m.value=!0,OliviaSoulEnsurePlayerPoll(),K};window.OliviaSoulLyricsPlayback=async(action,signal)=>{if(action==="previous")return S();if(action==="next")return U();if(!["pause","resume"].includes(action))throw new Error("unsupported playback action");const songId=String(window.__OliviaSoulSongId||""),sessionId=String(window.__OliviaSoulSessionId||"");if(!songId||!sessionId)throw new Error("playback changed");const response=await fetch("' + $playerCommandUrl + '",{method:"POST",headers:{"Content-Type":"application/json"},signal,body:JSON.stringify({cmd:action==="pause"?"suspend":"resume",songId,sessionId})});const result=await response.json();if(!response.ok||result.code!==0)throw new Error("playback failed");if(songId===String(window.__OliviaSoulSongId)&&sessionId===window.__OliviaSoulSessionId)window.__OliviaSoulCommandRevision=result.data.revision};return{isSongAvailable:a'
 $playerStateStoreCount = ([regex]::Matches($text, [regex]::Escape($playerStateStoreFrom))).Count
+$playerStateStoreTo = $playerStateStoreTo.Replace('const OliviaSoulDuration=Number(B.duration);', 'OliviaSoulCaptureStoppedPlayback(B);const OliviaSoulDuration=Number(B.duration);')
 if ($playerStateStoreCount -ne 1) { throw "expected one player store return, got $playerStateStoreCount" }
-$text = $text.Replace($playerStateStoreFrom, $playerStateStoreTo)
+$nativeLyricsSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'feapp-native-lyrics.js'), $utf8)
+$nativeLyricsSource = $nativeLyricsSource.Replace('__OLIVIA_NATIVE_CONTROL_URL__', ($ServiceUrl.TrimEnd('/') + '/toy/lyrics/native-control'))
+$text = $text.Replace($playerStateStoreFrom, $playerStateStoreTo.Replace(';return{isSongAvailable:a', (';' + $nativeLyricsSource + ';return{isSongAvailable:a')))
+$nativeProgressFrom = 'case"timeupdate":d.value=B.currentTime;break'
+if (([regex]::Matches($text,[regex]::Escape($nativeProgressFrom))).Count -ne 1) { throw 'expected one native progress observer' }
+$text = $text.Replace($nativeProgressFrom, 'case"timeupdate":if(!window.__OliviaSoulSongId&&te.value&&m.value){window.__OliviaSoulNativeProgressAt=Date.now();d.value=B.currentTime;}break')
 $playerStateExportFrom = 'playSonglistItem:A,resetStore:Ge}})'
 $playerStateExportTo = 'playSonglistItem:A,applyLocalPlayerState:OliviaSoulApplyPlayerState,beginLocalPlayback:OliviaSoulBeginLocalPlayback,applySongMetadata:OliviaSoulApplySongMetadata,resetStore:Ge}})'
 $playerStateExportCount = ([regex]::Matches($text, [regex]::Escape($playerStateExportFrom))).Count
@@ -144,6 +191,10 @@ $songEditorRowFrom = 'n("p",Ox,v(X.song.originalAuthor)+" • "+v(o(G)),1)],2)'
 $songEditorRowTo = 'n("p",Ox,v(X.song.originalAuthor)+" • "+v(o(G)),1),String(X.song.videoUrl||"").includes("/toy/midi/songs/")?n("button",{type:"button",style:{fontSize:"12px",textAlign:"left",color:"#4c8778",marginTop:"4px"},onClick:Oe(()=>OliviaSoulEditSong(X.song),["stop"]),onDblclick:Oe(()=>{},["stop"])},"名称 / 时段"):Y("",!0)],2)'
 if (([regex]::Matches($text,[regex]::Escape($songEditorRowFrom))).Count -ne 1) { throw "expected one local song row editor anchor" }
 $text = $text.Replace($songEditorRowFrom, $songEditorRowTo)
+$removeRowFrom = 'a.hideActions?Y("",!0):(r(),_("div",{key:0,class:ae(o(d))},['
+$removeRowTo = $removeRowFrom + 'String(X.song.videoUrl||"").includes("/toy/midi/songs/")?n("button",{type:"button",title:"从曲库移除，不删除原视频",style:{background:"transparent",border:"0",color:"inherit",minWidth:"52px",display:"flex",flexDirection:"column",alignItems:"center",cursor:"pointer",marginRight:"8px"},onClick:Oe(()=>OliviaSoulRemoveSong(X.song),["stop"]),onDblclick:Oe(()=>{},["stop"])},[k(oe,{type:"delete",class:"text-title-m m-1 text-info"}),n("span",{class:"text-label-s text-text-secondary"},"移除")]):Y("",!0),'
+if (([regex]::Matches($text,[regex]::Escape($removeRowFrom))).Count -ne 1) { throw 'expected one song action row' }
+$text = $text.Replace($removeRowFrom,$removeRowTo)
 
 $playlistAvailabilityFrom = 'a=B=>{var W;if(t.value!==Se.LITE)return!0;const K=l(B);return K?((W=i.getDownloadEntry(K))==null?void 0:W.state)==="completed":!0}'
 $playlistAvailabilityTo = 'a=B=>{var W;if(String(B&&B.videoUrl||"").includes("/toy/midi/songs/"))return!0;if(t.value!==Se.LITE)return!0;const K=l(B);return K?((W=i.getDownloadEntry(K))==null?void 0:W.state)==="completed":!0}'
@@ -261,18 +312,53 @@ $text = $text.Replace($myUploadSearchStateFrom, $myUploadSearchStateTo)
 
 $myUploadSearchHandlerFrom = 'dt=async()=>{Q.value&&($e(),await xe(),await zt(),X(eo(ct.value)))},Do=()=>{M(so)}'
 $myUploadSearchHandlerTo = 'dt=async()=>{Q.value&&($e(),await xe(),await zt(),X(eo(ct.value)))};let OliviaSoulSearchTimer=null,OliviaSoulUploadRefresh=null,OliviaSoulUploadRevision=null,OliviaSoulUploadRefreshing=!1,OliviaSoulSearchComposing=!1;const OliviaSoulSilentRefresh=async()=>{if(Q.value&&!OliviaSoulUploadRefreshing){OliviaSoulUploadRefreshing=!0;try{const at=await dm({query:OliviaSoulUploadSearch.value,cursor:0,pageSize:Math.max(100,he.value.length)});if(OliviaSoulUploadRevision===at.revision)return;OliviaSoulUploadRevision=at.revision;const vt=new Map(he.value.map((wt,kt)=>[wt.id,kt])),pt=new Set;at.list.forEach(wt=>{pt.add(wt.id);const kt=vt.get(wt.id);kt===void 0?he.value.push(wt):Object.assign(he.value[kt],wt)});if(!at.hasMore)for(let wt=he.value.length-1;wt>=0;wt-=1)pt.has(he.value[wt].id)||he.value.splice(wt,1);await zt()}finally{OliviaSoulUploadRefreshing=!1}}},OliviaSoulSearch=at=>{OliviaSoulUploadSearch.value=at.target.value;if(OliviaSoulSearchComposing)return;OliviaSoulSearchTimer&&clearTimeout(OliviaSoulSearchTimer),OliviaSoulSearchTimer=setTimeout(()=>dt(),250)},OliviaSoulCompositionStart=()=>{OliviaSoulSearchComposing=!0},OliviaSoulCompositionEnd=at=>{OliviaSoulSearchComposing=!1,OliviaSoulSearch(at)},Do=()=>{M(so)}'
+$myUploadSearchHandlerTo = $myUploadSearchHandlerTo.Replace('OliviaSoulUploadRevision=null,', 'OliviaSoulUploadRevision=null,OliviaSoulUploadGeneration=0,')
+$myUploadSearchHandlerTo = $myUploadSearchHandlerTo.Replace('try{const at=await dm(', 'try{const generation=OliviaSoulUploadGeneration;const at=await dm(')
+$myUploadSearchHandlerTo = $myUploadSearchHandlerTo.Replace('if(OliviaSoulUploadRevision===at.revision)return;', 'if(generation!==OliviaSoulUploadGeneration||OliviaSoulUploadRevision===at.revision)return;')
+$myUploadSearchHandlerTo = $myUploadSearchHandlerTo.Replace('OliviaSoulUploadRefreshing=!1}}', 'OliviaSoulUploadRefreshing=!1;OliviaSoulFlushLibraryRefresh()}}')
+$myUploadSearchHandlerTo = $myUploadSearchHandlerTo.Replace('const vt=new Map(he.value.map((wt,kt)=>[wt.id,kt])),pt=new Set;at.list.forEach(wt=>{pt.add(wt.id);const kt=vt.get(wt.id);kt===void 0?he.value.push(wt):Object.assign(he.value[kt],wt)});if(!at.hasMore)for(let wt=he.value.length-1;wt>=0;wt-=1)pt.has(he.value[wt].id)||he.value.splice(wt,1);', 'const vt=new Map(he.value.map(wt=>[wt.id,wt])),pt=new Set,ordered=at.list.map(wt=>{pt.add(wt.id);const old=vt.get(wt.id);return old?Object.assign(old,wt):wt});if(at.hasMore)for(const wt of he.value)pt.has(wt.id)||ordered.push(wt);he.value.splice(0,he.value.length,...ordered);')
 $myUploadSearchHandlerCount = ([regex]::Matches($text, [regex]::Escape($myUploadSearchHandlerFrom))).Count
 if ($myUploadSearchHandlerCount -ne 1) { throw "expected one My Upload refresh handler, got $myUploadSearchHandlerCount" }
 $text = $text.Replace($myUploadSearchHandlerFrom, $myUploadSearchHandlerTo)
 $songUploadMetadata = @'
+let OliviaSoulRemovalRevision=-1;
+let OliviaSoulLibraryRefreshQueued=false;
+function OliviaSoulFlushLibraryRefresh(){
+  if(OliviaSoulLibraryRefreshQueued&&Q.value&&!OliviaSoulUploadRefreshing){
+    OliviaSoulLibraryRefreshQueued=false;
+    void OliviaSoulSilentRefresh().catch(()=>{});
+  }
+}
+function OliviaSoulLibraryChanged(){
+  OliviaSoulUploadGeneration++;
+  OliviaSoulUploadRevision=null;
+  OliviaSoulLibraryRefreshQueued=true;
+  OliviaSoulFlushLibraryRefresh();
+}
 function OliviaSoulUploadMetadata(event){
   window.OliviaSoulSongEditor.applyMetadata([...he.value,...K.value],event.detail);
   h.applySongMetadata(event.detail);
+}
+function OliviaSoulUploadRemoved(event){
+  const ids=event.detail.ids;
+  OliviaSoulUploadGeneration++;
+  he.value=he.value.filter(item=>!ids.includes(window.OliviaSoulSongEditor.stableId(item)));
+  K.value=K.value.filter(item=>!(item.itemType===3||String(item.videoUrl||'').includes('/toy/midi/songs/'))||!ids.includes(window.OliviaSoulSongEditor.stableId(item)));
+  const counts=event.detail.counts;
+  if(counts&&Number.isSafeInteger(counts.playlistTotal)&&counts.playlistTotal>=0&&Number.isSafeInteger(counts.revision)&&counts.revision>=OliviaSoulRemovalRevision){
+    OliviaSoulRemovalRevision=counts.revision;Ee.value=counts.playlistTotal;
+  }
+  if(ids.includes(String(m.value)))m.value=null;
+  OliviaSoulUploadRevision=null;
 }
 '@
 $songUploadMetadataFrom = 'Lt().setOnJobCompleted(()=>{dt()});'
 if (([regex]::Matches($text,[regex]::Escape($songUploadMetadataFrom))).Count -ne 1) { throw "expected one upload completion anchor" }
 $text = $text.Replace($songUploadMetadataFrom, ($songUploadMetadata + $songUploadMetadataFrom))
+$playlistVisibleAddFrom = 'addItem:(E,M=0)=>{x(E)||(f.add(E.id),s.value.splice(M,0,E),c.value+=1)}'
+$playlistVisibleAddTo = 'addItem:(E,M=0)=>{s.value.some(A=>A.id===E.id)||(f.add(E.id),s.value.splice(M,0,E),c.value+=1)}'
+if (([regex]::Matches($text,[regex]::Escape($playlistVisibleAddFrom))).Count -ne 1) { throw "expected one paginated list add anchor" }
+$text = $text.Replace($playlistVisibleAddFrom, $playlistVisibleAddTo)
 
 $myUploadSearchRenderFrom = 'k(Eo,{"column-config":o(x),class:"mr-4"},null,8,["column-config"]),o(l)?'
 $myUploadSearchRenderTo = 'k(Eo,{"column-config":o(x),class:"mr-4"},null,8,["column-config"]),o(Q)?(r(),_("input",{key:"OliviaSoulSearch",value:o(OliviaSoulUploadSearch),type:"search",placeholder:"\u641c\u7d22\u6211\u7684\u4e0a\u4f20",class:"mx-3 mb-2 h-9 px-3 rounded-2 border border-grey-4 bg-grey-0 text-text-title text-body-m",onInput:OliviaSoulSearch,onCompositionstart:OliviaSoulCompositionStart,onCompositionend:OliviaSoulCompositionEnd},null,40,["value"])):Y("",!0),o(l)?'
@@ -290,6 +376,10 @@ $myUploadRefreshFrom = 'He(async()=>{if(w.value){await W().finally(()=>{a.value=
 $myUploadRefreshOfflineFrom = 'He(async()=>{if(w.value){a.value=!1;return}await Ua(),await W().finally(()=>{a.value=!1}),Po()});'
 $myUploadRefreshTo = 'He(async()=>{window.addEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),OliviaSoulUploadRefresh=setInterval(()=>{Q.value&&OliviaSoulSilentRefresh()},5000);if(w.value){await W().finally(()=>{a.value=!1}),Po();return}await Ua(),await W().finally(()=>{a.value=!1}),Po()}),Ot(()=>{window.removeEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),OliviaSoulUploadRefresh&&(clearInterval(OliviaSoulUploadRefresh),OliviaSoulUploadRefresh=null),OliviaSoulSearchTimer&&(clearTimeout(OliviaSoulSearchTimer),OliviaSoulSearchTimer=null)});'
 $myUploadRefreshCount = ([regex]::Matches($text, [regex]::Escape($myUploadRefreshFrom))).Count
+$myUploadRefreshTo = $myUploadRefreshTo.Replace('window.addEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),','window.addEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),window.addEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),')
+$myUploadRefreshTo = $myUploadRefreshTo.Replace('window.removeEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),','window.removeEventListener("oliviasoul-song-metadata",OliviaSoulUploadMetadata),window.removeEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),')
+$myUploadRefreshTo = $myUploadRefreshTo.Replace('window.addEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),','window.addEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),window.addEventListener("oliviasoul-library-changed",OliviaSoulLibraryChanged),')
+$myUploadRefreshTo = $myUploadRefreshTo.Replace('window.removeEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),','window.removeEventListener("oliviasoul-songs-removed",OliviaSoulUploadRemoved),window.removeEventListener("oliviasoul-library-changed",OliviaSoulLibraryChanged),')
 $myUploadRefreshOfflineCount = ([regex]::Matches($text, [regex]::Escape($myUploadRefreshOfflineFrom))).Count
 if (($myUploadRefreshCount + $myUploadRefreshOfflineCount) -ne 1) { throw "expected one My Upload mount flow, got online=$myUploadRefreshCount offline=$myUploadRefreshOfflineCount" }
 if ($myUploadRefreshCount -eq 1) { $text = $text.Replace($myUploadRefreshFrom, $myUploadRefreshTo) }

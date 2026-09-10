@@ -374,7 +374,7 @@ test("local webplayer command channel publishes a selected My Upload HTTP video"
     assert.equal(published.body.data.command.name, item.name);
     assert.ok(published.body.data.revision > 0);
     const current = await ctx.json("/toy/player-command");
-    assert.deepEqual(current.body.data, published.body.data);
+    assert.deepEqual(current.body.data, {...published.body.data,nativeCommand:null});
     const progress = await ctx.json("/toy/player-state", {
       method: "POST",
       body: JSON.stringify({

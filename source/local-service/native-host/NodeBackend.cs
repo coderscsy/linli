@@ -31,6 +31,7 @@ namespace OliviaSoul
         public int Port { get; private set; }
         public event Action<int> PortChanged;
         public event Action<string> Log;
+        public event Action<Dictionary<string, object>> LyricsFrame;
 
         public NodeBackend(AppPaths paths)
         {
@@ -223,6 +224,12 @@ namespace OliviaSoul
             {
                 var message = _json.Deserialize<Dictionary<string, object>>(line.Substring(ProtocolPrefix.Length));
                 var type = Convert.ToString(message["type"], CultureInfo.InvariantCulture);
+                if (type == "lyrics")
+                {
+                    var handler = LyricsFrame;
+                    if (handler != null) handler(message["data"] as Dictionary<string, object>);
+                    return;
+                }
                 if (type == "ready")
                 {
                     _ready.TrySetResult(Convert.ToInt32(message["port"], CultureInfo.InvariantCulture));

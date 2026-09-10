@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createLyricsPlayback } from '../lyrics/playback.js';
+test('playback bridge rejects offline, stale sessions, concurrent requests and replays', async () => {
+  let now = 10;
+  let state = {songId:'a',sessionId:'s',playbackState:'playing'};
+  const bridge = createLyricsPlayback({getState:()=>state, now:()=>now});
+  const request = {songId:'a',sessionId:'s',action:'next'};
+  assert.throws(()=>bridge.request(request), /游戏/);
+  assert.equal(bridge.poll().command, null);
+  const promise = bridge.request(request);
+  assert.throws(()=>bridge.request(request), /处理中/);
+  const command = bridge.poll().command;
+  bridge.ack({id:command.id,ok:true}); await promise;
+  assert.equal(bridge.poll().command, null);
+  assert.throws(()=>bridge.request({...request,sessionId:'old'}), /切换/);
+  const pending=bridge.request(request); state={...state,sessionId:'new'};
+  assert.equal(bridge.poll().command, null);
+  await assert.rejects(pending, /切换/);
+  now=10000; assert.throws(()=>bridge.request({...request,sessionId:'new'}), /游戏/);
+  bridge.close();
+});

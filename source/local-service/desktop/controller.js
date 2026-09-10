@@ -76,13 +76,14 @@ function assertPortAvailable(port) {
 }
 
 export class DesktopController {
-  constructor({ root, dataDir, appData, usersettingsPath, executable, onPortChanged }) {
+  constructor({ root, dataDir, appData, usersettingsPath, executable, onPortChanged, onLyricsFrame }) {
     this.root = root;
     this.dataDir = dataDir;
     this.appData = appData;
     this.usersettingsPath = usersettingsPath;
     this.executable = executable;
     this.onPortChanged = onPortChanged;
+    this.onLyricsFrame = onLyricsFrame;
     this.settingsPath = join(appData, "desktop-settings.json");
     this.currentPort = DEFAULT_PORT;
     this.clientExePath = "";
@@ -427,11 +428,11 @@ export class DesktopController {
     ]));
     const originals = await this.clientStage("originals", () => this.originalClientBackups(layout, true));
     this.mountRollbackContext = { layout, originals };
-    if (current.updateAvailable || (current.mounted && ["v31", "v32"].includes(current.revision) && layout.version === "0.0.9.627")) {
-      if (["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32"].includes(current.revision)) {
+    if (current.updateAvailable || (current.mounted && ["v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40", "v41", "v42", "v43", "v44"].includes(current.revision) && layout.version === "0.0.9.627")) {
+      if (["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40", "v41", "v42", "v43", "v44"].includes(current.revision)) {
         const originalFile = originals.feapp;
         // FE-only v28/v29/v30 upgrades must not disturb a current same-port player.
-        const keepWebplayer = ["v28", "v29", "v30", "v31", "v32"].includes(current.revision)
+        const keepWebplayer = ["v28", "v29", "v30", "v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40", "v41", "v42", "v43", "v44"].includes(current.revision)
           && currentWebplayer.mounted && currentWebplayer.port === port;
         const originalWebplayer = keepWebplayer ? null : originals.webplayer;
         if (port !== this.currentPort) await assertPortAvailable(port);
@@ -734,6 +735,7 @@ export class DesktopController {
       installDrive ? join(installDrive, "OliviaSoulData", "OliviaSoul", "workspace") : "",
     ].filter(Boolean);
     const nextService = await createOliviaService({
+      onLyricsFrame: this.onLyricsFrame,
       root: this.root,
       dataDir: this.dataDir,
       appData: this.appData,

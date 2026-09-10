@@ -872,7 +872,7 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
     readFile(new URL("../../tools/upgrade-webplayer-v6-v7.ps1", import.meta.url), "utf8"),
     readFile(new URL("../desktop/controller.js", import.meta.url), "utf8"),
   ]);
-  assert.match(patchScript, /OliviaSoulPatch:mail-music-v32/u);
+  assert.match(patchScript, /OliviaSoulPatch:mail-music-v40/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v32/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);
@@ -959,12 +959,12 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
   assert.match(patchScript, /h\.value==="songlist"/u);
   assert.match(patchScript, /OliviaSoulFinishLocalPlayback\(B\)/u);
   assert.match(patchScript, /p\.value===ot\.Single&&u\.value&&a\(u\.value\)\?M\(u\.value\):U\(\)/u);
-  assert.match(webplayerScript, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
+  assert.match(webplayerScript, /OliviaSoulPatch:webplayer-instant-seamless-v18/u);
   assert.match(webplayerScript, /\/toy\/player-command/u);
   assert.match(webplayerScript, /\/toy\/player-state/u);
   assert.match(webplayerScript, /sessionId/u);
   assert.match(webplayerScript, /mediaUrl/u);
-  assert.match(webplayerScript, /le\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\)/u,
+  assert.match(webplayerScript, /OliviaSoulSwapPlayback\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\)/u,
     "本地作品必须显式关闭从另一个 video 元素继承的循环属性");
   assert.match(webplayerScript, /le\(e\.url,\{loop:!!e\.loop,mute:e\.mute,offset:e\.offset\}\)/u,
     "官方作品必须显式覆盖从另一个 video 元素继承的循环属性");
@@ -984,7 +984,7 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
     "确实无法恢复默认片段时仍须停止当前演奏");
   assert.match(webplayerScript, /const c=Number\.isFinite\(t\.duration\)&&t\.duration>0\?t\.duration:0/u,
     "本地切歌期间不得把另一个 video 的共享短时长绑定给新作品");
-  assert.match(webplayerScript, /if\(e\.sessionId\)\{[\s\S]{0,600}\}else window\.__OliviaSoulRememberDefaultPlayback/u,
+  assert.match(webplayerScript, /if\(e\.sessionId\)\{[\s\S]{0,600}\}else\{window\.__OliviaSoulRememberDefaultPlayback/u,
     "本地 play 分支必须保留轮询器刚绑定的新会话，只有原生 play 才清除本地会话");
   assert.match(webplayerScript, /case"preload"[\s\S]{0,180}OliviaSoulRememberDefaultPlayback/u,
     "默认桌面仅处于预加载阶段时也必须留下可恢复候选");
@@ -996,8 +996,8 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
     "已经释放会话的本地 ended 不得结束刚切换的官方歌曲");
   assert.match(webplayerScript, /pe\(\{\.\.\.m\.command,__oliviaRevision:m\.revision/u,
     "轮询器必须把 revision 交给 play handler，并由新 video 建立后再绑定会话");
-  assert.match(webplayerScript, /le\(e\.url,\{loop:!1,mute:e\.mute,offset:e\.offset\}\),window\.__OliviaSoulActivePlayerRevision=Number\(e\.__oliviaRevision\)/u,
-    "同曲重播也必须在切换 video 后才绑定新会话，避免旧 ended 冒充新会话");
+  assert.match(webplayerScript, /if\(e\.target!==i\.value\)return;if\(window\.__OliviaSoulMediaSwap\)return/u,
+    "换帧期间必须屏蔽旧 video 的 ended，不能冒充新会话");
   assert.match(webplayerScript, /__OliviaSoulPlayerCommandKey===null\)[\s\S]{0,500}playbackState==="playing"[\s\S]{0,400}pe\(\{\.\.\.m\.command,[\s\S]{0,300}__oliviaRevision:m\.revision/u,
     "首次挂载时即使最新命令是 seek 或音量控制，也必须从 player-state 恢复正在播放的本地作品");
   assert.match(webplayerScript, /if\([^)]*__OliviaSoulActiveSessionId[^)]*\)return window\.__OliviaSoulPlayerPost/u,
@@ -1016,9 +1016,9 @@ test("v28 客户端补丁终止旧会话并按播放模式推进播单", async (
   assert.match(webplayerUpgradeScript, /__OliviaSoulPlayerCommandKey===null/u);
   assert.match(controller, /upgrade-feapp-v22-v23\.ps1/u);
   assert.match(controller, /upgrade-webplayer-v6-v7\.ps1/u);
-  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32"\]\.includes\(current\.revision\)[\s\S]{0,1600}patch-feapp-local\.ps1/u,
+assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40"\]\.includes\(current\.revision\)[\s\S]{0,1600}patch-feapp-local\.ps1/u,
     "v24 through v30 upgrades must rebuild current FE from pristine backup");
-  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32"\]\.includes\(current\.revision\)[\s\S]{0,2600}patch-webplayer-local\.ps1/u,
+  assert.match(controller, /\["v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40"\]\.includes\(current\.revision\)[\s\S]{0,2600}patch-webplayer-local\.ps1/u,
     "v24 through v30 upgrades must rebuild the WebPlayer when it is not current at the requested port");
   assert.match(webplayerScript, /\[string\]\$ServiceUrl/u);
   assert.doesNotMatch(patchScript, /OliviaSoulPendingUpload=b\(null\)/u);
@@ -1063,8 +1063,8 @@ test("webplayer 补丁精确移除桌面 UID 水印并可从原版备份还原",
     readFile(new URL("../../tools/restore-webplayer-original.ps1", import.meta.url), "utf8"),
   ]);
   const watermark = 'S(n)?(k(),we(l,{key:0,uid:S(n)},null,8,["uid"])):Re("",!0)';
-  assert.match(patch, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
-  assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-bounded-progress-v14/u);
+  assert.match(patch, /OliviaSoulPatch:webplayer-instant-seamless-v18/u);
+  assert.match(status, /OliviaSoulPatch:webplayer-instant-seamless-v18/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v13/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v12/u);
   assert.match(status, /OliviaSoulPatch:webplayer-no-watermark-direct-http-progress-v11/u);
@@ -1075,7 +1075,7 @@ test("webplayer 补丁精确移除桌面 UID 水印并可从原版备份还原",
   assert.match(patch, /__OliviaSoulPlayerPollBusy/u);
   assert.match(patch, /__OliviaSoulPlayerPost/u);
   assert.match(patch, /arrayBuffer/u);
-  assert.match(patch, /,1e3\)\}\)'/u);
+  assert.match(patch, /setInterval\(window\.__OliviaSoulRequestPlayerPoll,1e3\)/u);
   assert.match(patch, /\/toy\/player-command/u);
   assert.match(patch, /\/toy\/player-state/u);
   assert.ok(patch.includes(watermark));
@@ -4188,7 +4188,7 @@ test("管理前端包含视频维护、上方插入和本地服务状态", async
   assert.doesNotMatch(patch, /\$listWaitingCondition|\$listWaitingReply|\$waitingCondition/u);
   assert.match(patch, /\$pollingStateTo/u);
   assert.match(patch, /\$processingIconTo/u);
-  assert.match(patch, /OliviaSoulPatch:mail-music-v32/u);
+  assert.match(patch, /OliviaSoulPatch:mail-music-v40/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v32/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v30/u);
   assert.match(patchStatus, /OliviaSoulPatch:mail-music-v29/u);

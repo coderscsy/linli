@@ -53,7 +53,11 @@ $endpoints = @(
 )
 $ports = New-Object System.Collections.Generic.List[int]
 $complete = $true
-foreach ($endpoint in $endpoints) {
+# v11 predates local MIDI routing. Require its complete original 11-route set;
+# do not classify it against endpoints added by newer patch revisions.
+$requiredEndpoints = $endpoints
+if ($text.StartsWith('/*OliviaSoulPatch:mail-music-v11*/')) { $requiredEndpoints = $endpoints[0..10] }
+foreach ($endpoint in $requiredEndpoints) {
     $pattern = 'http://127\.0\.0\.1:(\d+)/toy' + [regex]::Escape($endpoint)
     $matches = @([regex]::Matches($text, $pattern))
     if ($matches.Count -ne 1) {
@@ -63,9 +67,21 @@ foreach ($endpoint in $endpoints) {
     $ports.Add([int]$matches[0].Groups[1].Value)
 }
 $uniquePorts = @($ports | Select-Object -Unique)
-$currentMarker = '/*OliviaSoulPatch:mail-music-v32*/'
+$currentMarker = '/*OliviaSoulPatch:mail-music-v44*/'
 $knownMarkers = @(
+    '/*OliviaSoulPatch:mail-music-v43*/',
+    '/*OliviaSoulPatch:mail-music-v42*/',
+    '/*OliviaSoulPatch:mail-music-v41*/',
+    '/*OliviaSoulPatch:mail-music-v40*/',
+    '/*OliviaSoulPatch:mail-music-v39*/',
+    '/*OliviaSoulPatch:mail-music-v38*/',
+    '/*OliviaSoulPatch:mail-music-v37*/',
     $currentMarker,
+    '/*OliviaSoulPatch:mail-music-v34*/',
+    '/*OliviaSoulPatch:mail-music-v35*/',
+    '/*OliviaSoulPatch:mail-music-v36*/',
+    '/*OliviaSoulPatch:mail-music-v33*/',
+    '/*OliviaSoulPatch:mail-music-v32*/',
     '/*OliviaSoulPatch:mail-music-v31*/',
     '/*OliviaSoulPatch:mail-music-v30*/',
     '/*OliviaSoulPatch:mail-music-v29*/',
@@ -82,7 +98,8 @@ $knownMarkers = @(
     '/*OliviaSoulPatch:mail-music-v17*/',
     '/*OliviaSoulPatch:mail-music-v16*/',
     '/*OliviaSoulPatch:mail-music-v15*/',
-    '/*OliviaSoulPatch:mail-music-v14*/'
+    '/*OliviaSoulPatch:mail-music-v14*/',
+    '/*OliviaSoulPatch:mail-music-v11*/'
 )
 $activeMarker = @($knownMarkers | Where-Object { $text.StartsWith($_) } | Select-Object -First 1)
 $managed = $complete -and $uniquePorts.Count -eq 1 -and $activeMarker.Count -eq 1

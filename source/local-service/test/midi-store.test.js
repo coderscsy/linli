@@ -8,6 +8,34 @@ import test from "node:test";
 import { MidiStore } from "../midi/store.js";
 import { createOliviaService } from "../server.js";
 
+test('removal hides a song but retains identity metadata for explicit restore',async()=>{
+ await withStore(async({store})=>{
+  const song=store.upsertUserSong({id:'removed',name:'Original',sourceKind:'import',videoPath:'a.mp4',contentHash:'7'.repeat(64)});
+  store.updateUserSongMetadata(song.id,{name:'Edited'});
+  assert.equal(store.removeUserSong(song.id),true);
+  assert.equal(store.getUserSong(song.id),null);
+  assert.equal(store.listPublishedUserSongs().length,0);
+  assert.equal(store.pagePublishedUserSongs({}).total,0);
+  assert.equal(store.restoreUserSong(song.id).name,'Edited');
+  assert.equal(store.getUserSong(song.id).videoPath,'a.mp4');
+ });
+});
+
+test('song source roots persist per work and duplicate import retains earlier roots', async () => {
+  await withStore(async ({store,db,root}) => {
+    const a=join(root,'A'), b=join(root,'B');
+    const input={id:'source-a',name:'A',sourceKind:'official-import',contentHash:'9'.repeat(64),videoPath:join(a,'a.mp4'),externalRoot:a};
+    store.upsertUserSong(input);
+    store.upsertUserSong({...input,id:'duplicate',externalRoot:b,videoPath:join(b,'a.mp4')});
+    store.upsertUserSong({...input,id:'source-b',contentHash:'8'.repeat(64),externalRoot:b,videoPath:join(b,'b.mp4')});
+    const reopened=new MidiStore({db,root});
+    assert.deepEqual(reopened.getUserSong('source-a').sourceRoots,[a,b]);
+    assert.deepEqual(reopened.getUserSong('source-b').sourceRoots,[b]);
+    assert.equal(reopened.getUserSong('duplicate'),null);
+    assert.deepEqual(reopened.listLibraryRoots().sort(),[a,b].sort());
+  });
+});
+
 test("song metadata overrides preserve identity, validate atomically and survive rescans", async () => {
   await withStore(async ({ store, db, root, advance }) => {
     const input = { id: "stable", name: "Original", sourceKind: "import", videoPath: "a.mp4", contentHash: "c".repeat(64), performanceType: "PlaySing", videoByTodView: { DEFAULT: "a.mp4", ALT_2: "b.mp4" } };

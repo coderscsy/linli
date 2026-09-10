@@ -38,6 +38,7 @@ namespace OliviaSoul
         private readonly WebView2 _webView;
         private readonly NotifyIcon _tray;
         private readonly ToolStripMenuItem _autoStartItem;
+        private readonly LyricsPresenter _lyrics;
         private readonly WindowControlButton _maximizeButton;
         private DesktopBridge _bridge;
         private Task _startupInitialization;
@@ -138,8 +139,20 @@ namespace OliviaSoul
             _autoStartItem = new ToolStripMenuItem("开机自动启动") { CheckOnClick = true };
             _autoStartItem.Click += async delegate { await SetAutoStartAsync(_autoStartItem.Checked); };
             var menu = new ContextMenuStrip();
+            _lyrics = new LyricsPresenter(this, _backend, data =>
+            {
+                if (!_quitting && _webView.CoreWebView2 != null)
+                    _webView.CoreWebView2.PostWebMessageAsJson(new JavaScriptSerializer().Serialize(data));
+            });
+            _lyrics.SettingsRequested += delegate {
+                if (_quitting) return;
+                ShowFromTray();
+                _webView.CoreWebView2?.PostWebMessageAsJson("{\"type\":\"lyrics-open-settings\"}");
+            };
             menu.Items.Add("打开管理窗口", null, delegate { ShowFromTray(); });
             menu.Items.Add(_autoStartItem);
+            menu.Items.Add(_lyrics.EnabledItem);
+            menu.Items.Add(_lyrics.LockedItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, delegate { RequestQuit(); });
             _tray = new NotifyIcon
@@ -231,6 +244,7 @@ namespace OliviaSoul
             await _backend.StartAsync();
             if (_quitting || IsDisposed) return;
             _backendReady = true;
+            _lyrics.Initialize();
             LogStartupStage("backend-ready");
             WriteRuntimeLog("desktop backend ready port=" + _backend.Port.ToString(CultureInfo.InvariantCulture));
             await RefreshAutoStartAsync();
@@ -327,16 +341,41 @@ namespace OliviaSoul
         {
             try
             {
-                var result = await _backend.SendAsync("setAutoStart", enabled);
-                var settings = result as IDictionary<string, object>;
-                _autoStartItem.Checked = settings != null && settings.ContainsKey("autoStart") &&
-                    Convert.ToBoolean(settings["autoStart"], CultureInfo.InvariantCulture);
+                await ChangeAutoStartAsync(enabled);
             }
             catch (Exception error)
             {
-                _autoStartItem.Checked = !enabled;
                 MessageBox.Show(error.Message, "开机自启设置失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private readonly System.Threading.SemaphoreSlim _autoStartGate = new System.Threading.SemaphoreSlim(1, 1);
+        public async Task<object> ChangeAutoStartAsync(bool enabled)
+        {
+            await _autoStartGate.WaitAsync();
+            try
+            {
+                var result = await _backend.SendAsync("setAutoStart", enabled);
+                PublishAutoStart(result);
+                return result;
+            }
+            catch
+            {
+                try { PublishAutoStart(await _backend.SendAsync("getSettings")); } catch { }
+                throw;
+            }
+            finally { _autoStartGate.Release(); }
+        }
+
+        private void PublishAutoStart(object result)
+        {
+            if (_quitting || IsDisposed) return;
+            var settings = result as IDictionary<string, object>;
+            if (settings == null || !settings.ContainsKey("autoStart")) return;
+            bool enabled = Convert.ToBoolean(settings["autoStart"], CultureInfo.InvariantCulture);
+            _autoStartItem.Checked = enabled;
+            _webView.CoreWebView2?.PostWebMessageAsJson(new JavaScriptSerializer().Serialize(
+                new { type = "auto-start-settings", autoStart = enabled }));
         }
 
         private void NavigateToPort(int port)
@@ -368,8 +407,10 @@ namespace OliviaSoul
         public void HideToTray()
         {
             if (IsDisposed) return;
-            Hide();
+            // Changing this property can recreate a maximized native window.
+            // Hide only after that recreation, so no empty HWND remains visible.
             ShowInTaskbar = false;
+            Hide();
         }
 
         public void ShowFromTray()
@@ -404,6 +445,7 @@ namespace OliviaSoul
         {
             if (_quitting || IsDisposed) return;
             _quitting = true;
+            _lyrics.Dispose();
             HideToTray();
             WriteRuntimeLog("desktop quit requested");
             _tray.Visible = false;
@@ -500,6 +542,7 @@ namespace OliviaSoul
         {
             if (disposing)
             {
+                _lyrics.Dispose();
                 _tray.Dispose();
                 _webView.Dispose();
                 _backend.Dispose();

@@ -95,6 +95,22 @@ function choosePreferredVideo(variants) {
   return keys.length ? variants[keys[0]] : null;
 }
 
+function hasSinglePerformanceFiles(entries) {
+  // Recognize the game's flat cache layout even after the containing folder is
+  // renamed. This is a grouping convention, not a substitute for content hashes
+  // when deciding whether an imported work already exists.
+  if (entries.some(entry => entry.isDirectory() || entry.isSymbolicLink())) return false;
+  const videos = entries.filter(entry => entry.isFile() && VIDEO_EXTENSIONS.has(extname(entry.name).toLowerCase()));
+  if (videos.length < 2) return false;
+  const stems = videos.map(entry => basename(entry.name, extname(entry.name)).toUpperCase());
+  if (stems.every(stem => /^(?:[A-F0-9]{32}|[A-F0-9]{64})$/u.test(stem))) return true;
+  const families = stems.map(stem => {
+    if (!/(?:^|[_-])TOD(?:1200|1730|2000)(?:[_-]|$)/u.test(stem)) return null;
+    return stem.replace(/TOD(?:1200|1730|2000)(?:[_-](?:NI|WI))?(?:[_-][LR])?/u, '{VARIANT}');
+  });
+  return families[0] !== null && families.every(family => family === families[0]);
+}
+
 async function collectFiles(root, output, depth = 0) {
   if (depth > 6) return;
   const entries = await readdir(root, { withFileTypes: true });
@@ -249,6 +265,16 @@ export async function scanPerformanceLibrary(libraryRoot) {
     }
   }
 
+  // The selected directory itself can be a single performance, not just a
+  // library containing performance folders. Keep its media variants together.
+  const topLevel = await readdir(root, { withFileTypes: true });
+  if (/^midi_[^\\/]+$/iu.test(basename(root)) || hasSinglePerformanceFiles(topLevel)) {
+    const files = [];
+    await collectFiles(root, files);
+    const entry = buildFallbackEntry(`个人上传 · ${basename(root)}`, files);
+    return { root, source: "performance-folders", entries: entry.midiPath || entry.videoPath ? [entry] : [], warnings: [] };
+  }
+
   const performanceDirectories = [];
   await collectPerformanceDirectories(root, performanceDirectories);
   if (performanceDirectories.length) {
@@ -264,7 +290,6 @@ export async function scanPerformanceLibrary(libraryRoot) {
     return { root, source: "performance-folders", entries, warnings: [] };
   }
 
-  const topLevel = await readdir(root, { withFileTypes: true });
   const entries = [];
   for (const directory of topLevel.filter(entry => entry.isDirectory() && !entry.isSymbolicLink())) {
     const files = [];
@@ -368,6 +393,7 @@ export async function importPerformanceLibrary(preview, {
   store,
   queue,
   mode = "copy",
+  restoreRemoved = true,
   managedRoot,
   probeVideoDurationUs = null,
   hashFile = sha256File,
@@ -385,7 +411,7 @@ export async function importPerformanceLibrary(preview, {
   const managedLibraryRoot = managedRoot ? resolve(managedRoot) : "";
   if (mode === "copy") await mkdir(managedLibraryRoot, { recursive: true });
   const libraryRoot = resolve(preview.root);
-  const existingSongs = store.listUserSongs();
+  const existingSongs = store.listUserSongs('', {includeRemoved:true});
   const songsByKnownName = new Map();
   for (const song of existingSongs) {
     for (const name of [song.name, song.originalName]) {
@@ -437,7 +463,8 @@ export async function importPerformanceLibrary(preview, {
   let imported = 0;
   let skipped = 0;
   for (const entry of preview.entries) {
-    if (await isKnownUnchangedReference(libraryRoot, entry, songsByKnownName, jobNames)) {
+    const restoring = restoreRemoved && songsByKnownName.get(normalizedName(entry.name))?.some(song => song.removed);
+    if (!restoring && await isKnownUnchangedReference(libraryRoot, entry, songsByKnownName, jobNames)) {
       skipped += 1;
       details.push({ name: entry.name, state: "skipped", reason: "duplicate" });
       continue;
@@ -490,12 +517,23 @@ export async function importPerformanceLibrary(preview, {
       const legacySong = songsByKnownName.get(normalizedName(entry.name))?.find(song =>
         matchesLegacyImportedSource(store, song, entry, variants, variantHashes));
       if (existingHashes.has(contentHash)) {
+        const sourceSong = existingSongs.find(song => song.contentHash === contentHash);
+        if (sourceSong) store.registerSongSource(sourceSong.id, libraryRoot);
+        if (restoreRemoved && sourceSong?.removed) {
+          store.restoreUserSong(sourceSong.id); imported++;
+          details.push({name:entry.name,state:'restored',songId:sourceSong.id}); continue;
+        }
         if (matchingSong) rememberReferenceSource(libraryRoot, entry, matchingSong.contentHash, afterSourceSignature);
         skipped += 1;
         details.push({ name: entry.name, state: "skipped", reason: "duplicate" });
         continue;
       }
       if (legacySong) {
+        store.registerSongSource(legacySong.id, libraryRoot);
+        if (restoreRemoved && legacySong.removed) {
+          store.restoreUserSong(legacySong.id); imported++;
+          details.push({name:entry.name,state:'restored',songId:legacySong.id}); continue;
+        }
         rememberReferenceSource(libraryRoot, entry, legacySong.contentHash, afterSourceSignature);
         skipped += 1;
         details.push({ name: entry.name, state: "skipped", reason: "duplicate" });

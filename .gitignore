@@ -25,3 +25,4 @@ source/midi-renderer/generated/
 **/.superpowers/
 **/UserData/
 **/client-backups/
+/outputs/

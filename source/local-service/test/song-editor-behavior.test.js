@@ -34,11 +34,12 @@ async function fixture({ failSave = false, metadata = record, saveResult = {}, s
   const requests = [], saved = [], events = [], saveLifecycle = [], timers = new Map();
   let timerId = 0;
   const window = { document, location: { href: "http://fixture.test/admin/" },
+    btoa: value => Buffer.from(value, 'binary').toString('base64'),
     setTimeout(callback, delay) { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout(id) { timers.delete(id); },
     dispatchEvent(event) { events.push(event); saveLifecycle.push({ type: "event", dialogOpen: walk(document.body).some(node => node.attributes.role === "dialog") }); } };
   const context = vm.createContext({ window, document, URL, AbortController, CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }, console,
-    fetch: async (url, options = {}) => { requests.push({ url, ...options }); if (options.method === "POST" && saveGate) await saveGate; return { ok: !failSave || options.method !== "POST", json: async () => failSave && options.method === "POST"
+    fetch: async (url, options = {}) => { requests.push({ url, ...options }); if (url.endsWith('/lyrics')) return { ok: true, json: async () => ({ code: 0, data: { variants: [{ key: 'DEFAULT0', bound: true, filename: 'saved.lrc', offsetMs: 100 }] } }) }; if (options.method === "POST" && saveGate) await saveGate; return { ok: !failSave || options.method !== "POST", json: async () => failSave && options.method === "POST"
       ? { code: 409, message: "save rejected" } : { code: 0, data: options.method === "POST" ? { ...metadata, name: "Saved", revision: "2", ...saveResult } : metadata } }; } });
   vm.runInContext(source, context);
   assert.equal(typeof window.OliviaSoulSongEditor?.open, "function", "shared editor API is implemented");
@@ -49,6 +50,54 @@ async function fixture({ failSave = false, metadata = record, saveResult = {}, s
   const all = () => walk(document.body);
   return { window, document, requests, saved, events, saveLifecycle, timers, handle, all, field: label => all().find(node => node.attributes["aria-label"] === label), button: name => all().find(node => node.tagName === "button" && node.textContent === name) };
 }
+
+test('playback errors shown to users are Chinese',async()=>{
+ const f=await fixture();
+ const message=f.window.OliviaSoulSongEditor.playbackMessage?.(Error('local player session unavailable'));
+ assert.match(message||'',/[\u4e00-\u9fff]/);assert.doesNotMatch(message||'',/local player/);
+});
+
+test('lyrics import binds the exact variant and stable ID without changing metadata or playback', async () => {
+  const f = await fixture();
+  const section = f.all().find(node => node.tagName === 'details' && node.children[0]?.textContent.startsWith('歌词：'));
+  f.field('歌词对应媒体版本').value = 'DEFAULT0'; section.open = true; await section.emit('toggle'); await nextTurn();
+  assert.equal(f.field('本版本歌词偏移（毫秒）').value, 100);
+  const bytes = Buffer.from('[00:01]测试歌词');
+  f.field('选择 LRC 歌词').files = [{ name: 'test.lrc', size: bytes.length, arrayBuffer: async () => bytes }];
+  f.field('本版本歌词偏移（毫秒）').value = '-250';
+  await f.button('导入并关联 / 保存偏移').emit('click');
+  const request = f.requests.at(-1);
+  assert.equal(request.url, '/admin/api/media/songs/stable%2Fid/lyrics');
+  assert.deepEqual(JSON.parse(request.body), { variant: 'DEFAULT0', offsetMs: -250, contentBase64: bytes.toString('base64'), filename: 'test.lrc' });
+  assert.equal(f.saved.length, 0); assert.equal(f.events.length, 0);
+  await f.button('解除本版本关联').emit('click'); assert.equal(f.requests.at(-1).method, 'DELETE');
+  await f.button('取消').emit('click'); assert.equal(f.timers.size, 0);
+});
+test('lyrics rejects oversize files before transport and close cancels pending file-read continuation', async () => {
+  const f = await fixture();
+  f.field('选择 LRC 歌词').files = [{ name: 'large.lrc', size: 256 * 1024 + 1 }];
+  await f.button('导入并关联 / 保存偏移').emit('click');
+  assert.equal(f.requests.length, 1);
+  let finish;
+  f.field('选择 LRC 歌词').files = [{ name: 'ok.lrc', size: 20, arrayBuffer: () => new Promise(resolve => { finish = resolve; }) }];
+  const operation = f.button('导入并关联 / 保存偏移').emit('click');
+  await f.button('取消').emit('click'); finish(Buffer.from('[00:01]test')); await operation;
+  assert.equal(f.requests.length, 1, 'closing editor must prevent a late import');
+  assert.equal(f.timers.size, 0);
+});
+
+test('bottom Save persists a lyric offset even when no title or time-slot changed', async () => {
+  const f = await fixture();
+  const section = f.all().find(node => node.tagName === 'details' && node.children[0]?.textContent.startsWith('歌词：'));
+  f.field('歌词对应媒体版本').value = 'DEFAULT0'; section.open = true; await section.emit('toggle'); await nextTurn();
+  f.field('本版本歌词偏移（毫秒）').value = '1500'; await f.field('本版本歌词偏移（毫秒）').emit('input');
+  await f.button('保存').emit('click');
+  const writes = f.requests.filter(r => r.method === 'POST');
+  assert.equal(writes.length, 1, 'offset-only save must not silently close');
+  assert.equal(writes[0].url, '/admin/api/media/songs/stable%2Fid/lyrics');
+  assert.equal(JSON.parse(writes[0].body).offsetMs, 1500);
+  assert.equal(f.document.body.children.length, 0);
+});
 
 test("open uses stable ID and text nodes, with no automatic variant binding or preview playback", async () => {
   const f = await fixture();
