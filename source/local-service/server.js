@@ -25,6 +25,7 @@ import {
   prepareSoulBundle,
 } from "./soul-bundle.js";
 import { TranscriptionEngine, TranscriptionJobs } from "./transcription.js";
+import { executeChatRequest } from "./model-transport.js";
 import { MidiStore } from "./midi/store.js";
 import { createMidiRoutes, formatSong } from "./midi/routes.js";
 import { describeSongMetadata, selectSongVariant, songVariants } from "./midi/song-metadata.js";
@@ -77,7 +78,7 @@ const BULK_SUMMARY_PROMPT_VERSION = "v4-source-attribution";
 const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPTION_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 const DEFAULT_UPDATE_REPOSITORY = "coderscsy/linli";
-const DEFAULT_UPDATE_TAG = "2008.2.7-linli.8";
+const DEFAULT_UPDATE_TAG = "2008.2.7-linli.9";
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions?/i,
   /system\s*prompt/i,
@@ -124,36 +125,6 @@ function modelIdsFromPayload(payload) {
     if (typeof item === "string") return item.trim();
     return String(item?.id ?? item?.name ?? item?.model ?? "").trim();
   }).filter(Boolean))].sort((left, right) => left.localeCompare(right));
-}
-
-function textFromModelContent(value) {
-  if (typeof value === "string") return value.trim();
-  if (!Array.isArray(value)) return "";
-  return value
-    .map(part => typeof part === "string" ? part : String(part?.text ?? part?.content ?? ""))
-    .map(part => part.trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
-function modelTextFromPayload(payload) {
-  const choice = payload?.choices?.[0];
-  const message = choice?.message;
-  const outputContent = Array.isArray(payload?.output)
-    ? payload.output.flatMap(item => Array.isArray(item?.content) ? item.content : [])
-    : [];
-  const candidates = [
-    message?.content,
-    message?.reasoning_content,
-    choice?.text,
-    payload?.output_text,
-    outputContent,
-  ];
-  for (const candidate of candidates) {
-    const text = textFromModelContent(candidate);
-    if (text) return text;
-  }
-  return "";
 }
 
 function releaseVersion(tag) {
@@ -741,9 +712,11 @@ export async function createOliviaService(options = {}) {
 
   function buildModelProbeCall(profile) {
     const call = buildChatRequest(profile, {
-      messages: [{ role: "user", content: "只回复 OK，不要解释" }],
+      messages: [{ role: "system", content: "只输出最终回答，不要解释" }, { role: "user", content: "只回复 OK，不要解释" }],
       maxTokens: 128,
     });
+    // Reasoning tokens share the output budget; 128 can be consumed before any answer.
+    if (call.body.thinking?.type === "enabled") call.body.max_tokens = 4096;
     call.body.stream = false;
     return call;
   }
@@ -752,16 +725,7 @@ export async function createOliviaService(options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000);
     try {
-      const response = await request(call.url, {
-        method: "POST",
-        headers: call.headers,
-        body: JSON.stringify(call.body),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      const content = modelTextFromPayload(payload);
-      if (!content) throw new Error("模型没有返回有效文字");
+      const { content } = await executeChatRequest(call, { fetchImpl: request, signal: controller.signal });
       return content;
     } finally {
       clearTimeout(timer);
@@ -3526,6 +3490,7 @@ export async function createOliviaService(options = {}) {
           method: "GET",
           headers: call.headers,
           signal: controller.signal,
+          redirect: "error",
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const models = modelIdsFromPayload(await response.json());
@@ -3712,7 +3677,7 @@ export async function createOliviaService(options = {}) {
       };
       let call;
       try {
-        call = buildChatRequest(profile, { messages: [{ role: "user", content: "测试" }], maxTokens: 1 });
+        call = buildModelProbeCall(profile);
       } catch (error) {
         throw httpError(400, safeModelError(error));
       }
@@ -3720,14 +3685,7 @@ export async function createOliviaService(options = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30000);
       try {
-        const response = await request(call.url, {
-          method: "POST",
-          headers: call.headers,
-          body: JSON.stringify(call.body),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        await response.json();
+        await executeChatRequest(call, { fetchImpl: request, signal: controller.signal });
         return ok(req, res, { connected: true });
       } catch (error) {
         throw httpError(502, `DeepSeek 连通性测试失败：${safeModelError(error)}`);
@@ -3762,15 +3720,7 @@ export async function createOliviaService(options = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000);
       try {
-        const response = await request(call.url, {
-          method: "POST",
-          headers: call.headers,
-          body: JSON.stringify(call.body),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const payload = await response.json();
-        const raw = String(payload.choices?.[0]?.message?.content ?? "").trim();
+        const { content: raw } = await executeChatRequest(call, { fetchImpl: request, signal: controller.signal });
         const start = raw.indexOf("{");
         const end = raw.lastIndexOf("}");
         if (start < 0 || end <= start) throw new Error("模型没有返回 JSON");

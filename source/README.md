@@ -1,6 +1,8 @@
 # 工程源码
 
-本目录为 R10.6 桌面歌词与曲库累计更新源码（更新标识：2008.2.7-linli.8，程序版本：2008.2.7；FE v44 / WebPlayer v18）。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
+本目录为 R10.7 中转 API 兼容更新源码（更新标识：2008.2.7-linli.9，程序版本：2008.2.7；FE v44 / WebPlayer v18），包含 R10.6 累计功能。用户请先阅读[仓库 README](../README.md)及[完整使用说明](local-service/packaging/使用说明.txt)。
+
+本轮改动见 [中转 API 兼容说明](../docs/MODEL_API_COMPATIBILITY.md)：手动模型名、端点规范化、JSON/SSE 正文解析和调用一致性修复。配置方法见 [API 配置使用说明](local-service/packaging/API配置使用说明.md)。
 
 ```text
 source/

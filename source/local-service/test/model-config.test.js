@@ -86,6 +86,7 @@ test("模型请求按当前档案构造且本地无鉴权不携带 DeepSeek 字�
   assert.deepEqual(local.body, {
     model: "gemma-local",
     messages,
+    stream: false,
     temperature: 0.2,
     max_tokens: 64,
   });

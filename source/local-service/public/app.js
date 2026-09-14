@@ -578,25 +578,30 @@ async function pollStorageMigrationPreview() {
 
 function replaceModelOptions(targetSelector, models, preferred = "") {
   const target = $(targetSelector);
+  const options = $(targetSelector + "Options");
   const values = [...new Set(models.map(value => String(value).trim()).filter(Boolean))];
-  target.replaceChildren();
-  if (!values.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "尚未查询到模型";
-    option.disabled = true;
-    option.selected = true;
-    target.append(option);
-    return;
-  }
+  options.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = values.length ? "从查询结果选择（可选）" : "未查询到模型，可手动输入";
+  options.append(placeholder);
   for (const value of values) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = value;
     option.title = value;
-    target.append(option);
+    options.append(option);
   }
-  target.value = values.includes(preferred) ? preferred : values[0];
+  target.value = preferred;
+  options.value = values.includes(preferred) ? preferred : "";
+}
+
+for (const id of ["modelName", "localModelName"]) {
+  const input = $("#" + id), options = $("#" + id + "Options");
+  options.addEventListener("change", () => { if (options.value) input.value = options.value; });
+  input.addEventListener("input", () => {
+    options.value = [...options.options].some(option => option.value === input.value) ? input.value : "";
+  });
 }
 
 async function queryModels(provider) {
@@ -609,7 +614,7 @@ async function queryModels(provider) {
     resultSelector,
     pendingText: "正在查询模型列表……",
     successText: result => `已查询到 ${result.models.length} 个模型；请选择后保存并测试`,
-    failureText: "查询失败",
+    failureText: "查询失败（可手动输入模型名后测试）",
     operation: async () => {
       const result = await api("/admin/api/model/models", {
         method: "POST",
@@ -619,7 +624,8 @@ async function queryModels(provider) {
         $("#customModel").checked = true;
         $("#customFields").hidden = false;
       }
-      replaceModelOptions(target, result.models, profile.model);
+      // Preserve edits made while model discovery was in flight.
+      replaceModelOptions(target, result.models, $(target).value);
       return result;
     },
   });
@@ -756,7 +762,7 @@ async function saveMemory() {
 }
 
 function providerLabel(provider) {
-  return provider === "local" ? "本地兼容 API" : "远程兼容 API";
+  return provider === "local" ? "通用兼容 API" : "远程兼容 API";
 }
 
 function openMidiSongEditor(songId) {

@@ -4,6 +4,7 @@ import { copyFile, mkdir, open, readFile, rename, rm, stat } from "node:fs/promi
 import { extname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { activeModelProfile, buildChatRequest } from "./model-config.js";
+import { executeChatRequest } from "./model-transport.js";
 
 const MODEL_NAME = "ggml-small.bin";
 const MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
@@ -231,16 +232,7 @@ export class TranscriptionEngine {
         ],
       });
       call.body.stream = false;
-      const response = await this.fetch(call.url, {
-        method: "POST",
-        headers: call.headers,
-        body: JSON.stringify(call.body),
-        signal,
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(`${config.activeProvider} 整理失败：HTTP ${response.status}`);
-      const content = body?.choices?.[0]?.message?.content?.trim();
-      if (!content) throw new Error(`${config.activeProvider} 未返回整理文字`);
+      const { content } = await executeChatRequest(call, { fetchImpl: this.fetch, signal });
       organized.push(content);
     }
     return organized.join("\n\n");

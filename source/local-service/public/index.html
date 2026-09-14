@@ -83,7 +83,7 @@
                   <label for="modelProvider">编辑模型档案</label>
                   <select id="modelProvider">
                     <option value="deepseek">远程兼容 API</option>
-                    <option value="local">本地兼容 API</option>
+                    <option value="local">通用兼容 API（本地 / 中转）</option>
                   </select>
                 </div>
                 <button id="activateModelProvider" type="button">检测并设为当前模型</button>
@@ -119,9 +119,10 @@
                 </label>
                 <div id="customFields" class="customFields" hidden>
                   <div>
-                    <label for="modelName">模型名</label>
-                    <select id="modelName">
-                      <option value="" disabled selected>请先查询模型</option>
+                    <label for="modelName">模型名（可手动输入）</label>
+                    <input id="modelName" type="text" autocomplete="off" placeholder="填写接口提供的模型 ID">
+                    <select id="modelNameOptions" class="modelCandidates" aria-label="远程模型查询结果">
+                      <option value="">从查询结果选择（可选）</option>
                     </select>
                   </div>
                   <div>
@@ -139,19 +140,21 @@
 
             <div class="settingsSubcard modelProfile" data-model-profile="local" hidden>
               <div class="settingsSubcardHead">
-                <strong>本地兼容 API</strong>
-                <small>连接已经运行的 OpenAI-compatible 本地服务</small>
+                <strong>通用兼容 API（本地 / 中转）</strong>
+                <small>支持 Chat Completions 兼容接口；不提供模型列表时可直接手动输入模型名。</small>
               </div>
               <div class="modelSettings localModelFields">
                 <div>
-                  <label for="localModelName">模型名</label>
-                  <select id="localModelName">
-                    <option value="" disabled selected>请先查询模型</option>
+                  <label for="localModelName">模型名（可手动输入）</label>
+                  <input id="localModelName" type="text" autocomplete="off" placeholder="填写中转或本地接口的模型 ID">
+                  <select id="localModelNameOptions" class="modelCandidates" aria-label="通用模型查询结果">
+                    <option value="">从查询结果选择（可选）</option>
                   </select>
                 </div>
                 <div>
                   <label for="localModelBaseUrl">地址</label>
-                  <input id="localModelBaseUrl" type="url" value="http://127.0.0.1:8000/v1" placeholder="例如 http://127.0.0.1:8000/v1">
+                  <input id="localModelBaseUrl" type="url" value="http://127.0.0.1:8000/v1" placeholder="例如 https://接口域名/v1">
+                  <p class="fieldHint">支持基础地址或完整 /chat/completions 地址；保留服务商提供的 /v1 等路径。</p>
                 </div>
                 <div>
                   <label for="localAuthMode">鉴权方式</label>
@@ -161,7 +164,7 @@
                   </select>
                 </div>
                 <div id="localApiKeyField" hidden>
-                  <label for="localApiKey">本地接口 API Key</label>
+                  <label for="localApiKey">接口 API Key</label>
                   <div class="secretInput">
                     <input id="localApiKey" type="password" autocomplete="off" placeholder="仅 Bearer 鉴权时填写">
                     <button id="toggleLocalApiKey" class="eyeButton" type="button" title="显示 API Key" aria-label="显示 API Key">
@@ -176,7 +179,7 @@
               </div>
               <div class="actions">
                 <button id="queryLocalModels" class="secondary" type="button">查询模型列表</button>
-                <button id="testLocalModel" class="secondary" type="button">保存并测试本地模型</button>
+                <button id="testLocalModel" class="secondary" type="button">保存并测试通用模型</button>
                 <span id="localModelResult" class="result"></span>
               </div>
             </div>

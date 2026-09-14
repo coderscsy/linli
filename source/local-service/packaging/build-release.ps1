@@ -211,7 +211,7 @@ function Copy-ZipEntry([string]$Archive, [string]$EntryName, [string]$Destinatio
 }
 
 function Copy-ReviewGuides([string]$Source, [string]$Stage, [string]$Output = "") {
-    foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
+    foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md", "API配置使用说明.md")) {
         Copy-PublicFile (Join-Path $Source $name) (Join-Path $Stage $name)
         if (-not [string]::IsNullOrWhiteSpace($Output)) {
             Copy-PublicFile (Join-Path $Source $name) (Join-Path $Output $name)
@@ -354,7 +354,7 @@ Copy-PublicFile (Join-Path $ffmpegRoot.FullName "bin\ffprobe.exe") (Join-Path $s
 Copy-PublicFile (Join-Path $ffmpegRoot.FullName "LICENSE.txt") (Join-Path $stage "runtime\ffmpeg\LICENSE.txt")
 
 foreach ($name in @(
-    "server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js",
+    "server.js", "transcription.js", "remote-memory.js", "soul-bundle.js", "model-config.js", "model-transport.js",
     "data-migration.js", "storage-paths.js", "storage-migration.js", "update-download.js", "update-network.js"
 )) {
     Copy-PublicFile (Join-Path $project $name) (Join-Path $stage "app\$name")
@@ -506,7 +506,7 @@ if (-not $InstallerOnly) {
     Copy-VerifiedPackageFile -Source $auditedPortable -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Portable.zip") -ExpectedSha256 $portableReceipt.ArchiveSha256
 }
 Copy-VerifiedPackageFile -Source $setupCandidate -Destination (Join-Path $releaseCandidateDirectory "OliviaSoul-$version-Setup.exe") -ExpectedSha256 $setupHash
-foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md")) {
+foreach ($name in @("使用说明.txt", "发布说明.md", "反馈指南.md", "API配置使用说明.md")) {
     $guideManifestValue = [string]$frozenReceipt.Manifest[$name]
     if ([string]::IsNullOrWhiteSpace($guideManifestValue)) { throw "冻结发布说明缺失：$name" }
     $guideHash = $guideManifestValue.Split(':', 2)[1]

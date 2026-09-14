@@ -42,7 +42,11 @@ function normalizeBaseUrl(value) {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new Error("请填写有效的模型地址");
-  return text;
+  if (url.username || url.password || /[?#]/u.test(text))
+    throw new Error("模型地址不能包含账号密码、查询参数或片段；密钥请填写到 API Key");
+  if (/\/(messages|responses)$/iu.test(url.pathname.replace(/\/+$/u, "")))
+    throw new Error("当前仅支持 Chat Completions 兼容接口，不支持原生 Messages / Responses 地址");
+  return text.replace(/\/chat\/completions$/iu, "");
 }
 
 function normalizeProfile(provider, profile, { requireBearerKey = false } = {}) {
@@ -171,12 +175,14 @@ export function buildChatRequest(profile, payload = {}) {
   const body = {
     model: selected.model,
     messages: payload.messages ?? [],
+    stream: false,
   };
   if (payload.temperature !== undefined) body.temperature = payload.temperature;
   if (payload.maxTokens !== undefined) body.max_tokens = payload.maxTokens;
-  if (selected.provider === "deepseek") {
-    if (payload.thinking !== undefined) body.thinking = payload.thinking;
-    if (payload.reasoning_effort !== undefined) body.reasoning_effort = payload.reasoning_effort;
+  // A custom remote profile is not necessarily a DeepSeek model.
+  if (selected.provider === "deepseek" && /(?:^|\/)deepseek(?:[-/]|$)/iu.test(selected.model)) {
+    body.thinking = payload.thinking ?? { type: "enabled" };
+    if (body.thinking.type !== "disabled") body.reasoning_effort = payload.reasoning_effort ?? "high";
   }
   const headers = { "Content-Type": "application/json" };
   if (selected.authMode === "bearer") headers.Authorization = `Bearer ${selected.apiKey}`;

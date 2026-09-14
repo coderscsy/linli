@@ -299,6 +299,10 @@ small { display: block; color: #77777d; font-size: 11px; margin-top: 2px; }
 .modelSettings, .importRow { display: grid; gap: 12px; }
 .modelSettings > div > input, .modelSettings > div > select, .secretInput input, .importRow > input:not(.nativeFile), textarea { width: 100%; }
 .localModelFields { grid-template-columns: 1fr 1fr; }
+.modelCandidates { margin-top: 8px; }
+.modelSettings > div, .customFields > div { min-width: 0; }
+.customFields > div > input, .customFields > div > select { width: 100%; }
+.modelSettings .fieldHint { margin: 6px 0 0; color: #8b9099; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .secretInput { position: relative; }
 .secretInput input { padding-right: 44px; }
 .secretInput input::-ms-reveal, .secretInput input::-ms-clear { display: none; }

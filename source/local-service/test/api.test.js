@@ -2641,11 +2641,11 @@ test("管理页手动切换模型：分别编辑测试并显式启用档案", as
   assert.match(html, /id="resetModelConfig"/u);
   assert.match(html, /id="resetModelResult"/u);
   assert.match(html, /远程兼容 API/u);
-  assert.match(html, /本地兼容 API/u);
+  assert.match(html, /通用兼容 API/u);
   assert.match(html, /id="queryRemoteModels"/u);
   assert.match(html, /id="queryLocalModels"/u);
-  assert.match(html, /<select id="modelName"/u);
-  assert.match(html, /<select id="localModelName"/u);
+  assert.match(html, /<input id="modelName"/u);
+  assert.match(html, /<input id="localModelName"/u);
   assert.doesNotMatch(html, /data-model-combobox|localAiExecutable|本地 AI 进程/u);
   assert.match(html, /data-tab="update"/u);
   assert.match(html, /data-page="update"/u);
@@ -2988,7 +2988,7 @@ test("保存并测试成功后才写入用户选择的模型", async t => {
   assert.equal(tested.body.data.config.activeProvider, "deepseek");
 });
 
-test("模型连通性测试兼容主流文本响应结构和推理文本", async t => {
+test("模型连通性测试兼容正文响应结构但拒绝仅推理内容", async t => {
   const payloads = [
     { choices: [{ message: { content: [{ type: "text", text: "OK" }] } }] },
     { choices: [{ message: { content: null, reasoning_content: "OK" } }] },
@@ -3016,7 +3016,7 @@ test("模型连通性测试兼容主流文本响应结构和推理文本", async
         apiKey: "",
       }),
     });
-    assert.equal(tested.status, 200);
+    assert.equal(tested.status, index === 1 ? 502 : 200);
   }
 
   assert.equal(calls.length, 5);
@@ -3060,7 +3060,7 @@ test("本地 AI 进程接口已移除且不再启动外部程序", async t => {
   }
 });
 
-test("R10.5 默认更新标识不会把旧公开包误报为待更新", async t => {
+test("R10.7 默认更新标识不会把旧公开包误报为待更新", async t => {
   const calls = [];
   const ctx = await fixture({ fetch: async url => {
     calls.push(url);
@@ -3073,7 +3073,7 @@ test("R10.5 默认更新标识不会把旧公开包误报为待更新", async t 
   assert.equal(calls.length, 0, "启动服务不应主动检查更新");
   const checked = await ctx.request("/admin/api/update");
   assert.equal(checked.status, 200);
-  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.7");
+  assert.equal(checked.body.data.currentTag, "2008.2.7-linli.9");
   assert.equal(checked.body.data.updateAvailable, false);
   assert.equal(calls.length, 1);
 });

@@ -4,7 +4,20 @@
 
 不提供游戏本体、官方账号数据或官方演奏视频，不恢复已关闭的官方服务器。
 
-## R10.6 桌面歌词与曲库累计更新（2026-09-10）
+## R10.7 中转 API 兼容更新（2026-09-14）
+
+更新标识 **`2008.2.7-linli.9`**，程序版本保持 `2008.2.7`，客户端补丁仍为 **FE v44 / WebPlayer v18**。包含下方 R10.6 的全部功能。
+
+[本次发布页](https://github.com/coderscsy/linli/releases/tag/2008.2.7-linli.9) · [安装版 Setup](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.9/OliviaSoul-2008.2.7-Setup.exe) · [便携版 Portable](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.9/OliviaSoul-2008.2.7-Portable.zip) · [SHA-256 校验](https://github.com/coderscsy/linli/releases/download/2008.2.7-linli.9/SHA256SUMS.txt)
+
+- 新增手动填写模型名及可选模型查询；中转站与本地服务统一使用“通用兼容 API”档案。
+- 兼容完整 Chat Completions 地址、JSON 分段正文及 SSE 响应；明确拒绝 `max_tokens` 时按同一上限兼容 `max_completion_tokens`。
+- 修复查询结果覆盖手填模型名、非 DeepSeek 模型收到专用参数，以及推理内容、截断回复被误判成功的问题；统一检测、AI 导入、文本整理和实际回信的处理规则。
+- 随包附中文 API 配置说明，包含 seekai.cc 示例、地址用途和常见错误说明。尚未使用 seekai.cc 用户密钥实测，不代表支持所有原生协议或商业中转站。
+
+[本次更新说明](release/linli.9.md) · [API 配置使用说明](source/local-service/packaging/API配置使用说明.md) · [兼容范围](docs/MODEL_API_COMPATIBILITY.md)
+
+## R10.6 历史更新：桌面歌词与曲库（2026-09-10）
 
 更新标识 **`2008.2.7-linli.8`**，程序版本保持 `2008.2.7`，客户端补丁 **FE v44 / WebPlayer v18**。安装版和便携版包含完整运行时，不需要另外安装 Node.js。
 
@@ -86,6 +99,8 @@
 4. **先关闭游戏**，进入“客户端与桌面”选择正确的游戏 exe，点击“启用服务”，等待明确成功，再从 Steam 启动游戏。后续使用本地功能时，应先开 OliviaSoul 并保持后台运行，再开游戏。
 5. “官方作品”中选择包含成品 MP4 的文件夹，点击“扫描预览”，核对可导入/跳过项目后“确认导入”。在游戏曲库的“我的上传”中查看、播放或编辑。
 6. 需要歌词时，在“歌词设置”启用；上传作品可在“名称 / 时段”编辑器导入 LRC。同一作品的视频版本默认共享文本、分别保存偏移；游戏底部“词”按钮可随时开关。
+
+R10.7 新增的手动模型名、中转地址及响应兼容处理见 [模型与中转 API 兼容说明](docs/MODEL_API_COMPATIBILITY.md)；配置步骤见 [API 配置使用说明](source/local-service/packaging/API配置使用说明.md)。旧的 R10.6 安装包不包含这些改动。
 
 关闭管理窗口会隐藏到托盘；托盘“退出”会立即收起窗口，随后结束后台清理。**停用服务**是还原游戏客户端的本地接入补丁，不等于退出 OliviaSoul。启用/停用期间不要强制结束程序；若失败，保留报错并反馈。
 

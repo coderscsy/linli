@@ -80,7 +80,7 @@ test('output guard refuses nonempty, filesystem root and project paths without m
 
 test('review guides ship verbatim both inside payload and beside archives', async () => {
   const root = await fixture();
-  const guides = ['使用说明.txt', '发布说明.md', '反馈指南.md'];
+  const guides = ['使用说明.txt', '发布说明.md', '反馈指南.md', 'API配置使用说明.md'];
   for (const name of guides) await put(root, `docs/${name}`, `PUBLIC ${name}\n`);
   const result = powershell(parse + `
     foreach($name in @('Ensure-Directory','Copy-PublicFile','Copy-ReviewGuides')) {
